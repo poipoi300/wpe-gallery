@@ -75,7 +75,7 @@ try:
     click(3900, 692)
     assignment = config / "linux-wallpaperengine/assignments.json"
     assert json.loads(assignment.read_text())["outputs"]["HEADLESS-1"]["wallpaper_id"] == "1002"
-    assert (artifact / "systemctl.log").read_text().strip() == "--user restart linux-wallpaperengine.service"
+    assert (artifact / "systemctl.log").read_text().strip() == "--user reload-or-restart linux-wallpaperengine.service"
     # Title click selects first safe item; Apply button uses its shorter details layout.
     click(100, 280)
     click(3900, 625)
