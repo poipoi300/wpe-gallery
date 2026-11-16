@@ -1,4 +1,5 @@
 // One authoritative whitelist/hash implementation, shared by GUI and launcher.
+pub use crate::hash_cache::HashCache;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -77,7 +78,15 @@ pub fn read_whitelist(path: &Path) -> Result<Whitelist> {
     }
     Ok(reviews)
 }
-pub fn assess(reviews: &Whitelist, id: &str, directory: &Path) -> Status {
+/// With `cache`, an unchanged tree reuses its last hash; that is fast enough
+/// for badges but not proof of unchanged content (see `hash_cache`), so
+/// authorizing callers pass None and hash the whole tree.
+pub fn assess(
+    reviews: &Whitelist,
+    id: &str,
+    directory: &Path,
+    cache: Option<&HashCache>,
+) -> Status {
     let Some(r) = reviews.get(id) else {
         return Status::unreviewed("No review for this Workshop ID.");
     };
@@ -88,7 +97,11 @@ pub fn assess(reviews: &Whitelist, id: &str, directory: &Path) -> Status {
             reason: format!("Blocked by {}: {}", r.reviewer, r.notes),
         };
     }
-    match content_hash(directory) {
+    let hash = match cache {
+        Some(cache) => cache.content_hash(id, directory),
+        None => content_hash(directory),
+    };
+    match hash {
         Ok(hash) if hash == r.content_hash => Status {
             label: "Safe",
             allowed: true,
@@ -129,9 +142,10 @@ pub fn assess_installed(
     id: &str,
     directory: &Path,
     roots: &[PathBuf],
+    cache: Option<&HashCache>,
 ) -> Status {
     match resolve_in(id, roots) {
-        Ok(path) if path == directory => assess(reviews, id, directory),
+        Ok(path) if path == directory => assess(reviews, id, directory, cache),
         Ok(path) => Status::unreviewed(format!(
             "Installed copy moved to {}; reopen the gallery.",
             path.display()
@@ -139,23 +153,62 @@ pub fn assess_installed(
         Err(e) => Status::unreviewed(format!("{e:#}")),
     }
 }
+/// Authorize `id` for running: always a full hash, never the cache.
 pub fn verify(id: &str) -> Result<PathBuf> {
     let reviews = read_whitelist(&whitelist_path())?;
     let path = resolve(id)?;
-    let status = assess(&reviews, id, &path);
+    let status = assess(&reviews, id, &path, None);
     ensure!(status.allowed, "Workshop {id}: {}", status.reason);
     Ok(path.canonicalize()?)
+}
+/// Run `work` over `items` on a few threads and hand each result to `sink`
+/// on the calling thread as it completes. A few readers keep a disk busy
+/// without thrashing it. Returning false from `sink` stops the remaining work.
+pub fn parallel_map<T: Sync, R: Send>(
+    items: &[T],
+    work: impl Fn(&T) -> R + Sync,
+    mut sink: impl FnMut(usize, R) -> bool,
+) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 4)
+        .min(items.len().max(1));
+    let (next, stop) = (AtomicUsize::new(0), AtomicBool::new(false));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let (sender, next, stop, work) = (sender.clone(), &next, &stop, &work);
+            scope.spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(item) = items.get(index) else { break };
+                    if sender.send((index, work(item))).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+        for (index, result) in receiver {
+            if !sink(index, result) {
+                stop.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+    });
 }
 // Authoritative format: wpe-gallery-content-v1. Same stream as tools/triage:
 // sorted UTF-8 relative paths, D/F tags, big-endian u64 path lengths;
 // files add big-endian u64 size and raw bytes. Include empty directories.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Fingerprint {
-    size: u64,
-    modified: std::time::SystemTime,
-    directory: bool,
+pub(crate) struct Fingerprint {
+    pub(crate) size: u64,
+    pub(crate) modified: std::time::SystemTime,
+    pub(crate) directory: bool,
+    /// (dev, ino, ctime seconds, ctime nanoseconds).
     #[cfg(unix)]
-    identity: (u64, u64, i64, i64),
+    pub(crate) identity: (u64, u64, i64, i64),
 }
 fn fingerprint(metadata: &fs::Metadata) -> Result<Fingerprint> {
     ensure!(
@@ -179,27 +232,45 @@ fn fingerprint(metadata: &fs::Metadata) -> Result<Fingerprint> {
     })
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Entry {
-    name: String,
-    path: PathBuf,
-    metadata: Fingerprint,
+pub(crate) struct Entry {
+    pub(crate) name: String,
+    pub(crate) path: PathBuf,
+    pub(crate) metadata: Fingerprint,
 }
 pub fn content_hash(root: &Path) -> Result<String> {
-    hash_with_hook(root, |_| {})
+    Ok(hash_tree(root, snapshot(root)?, |_| {})?.0)
 }
-fn hash_with_hook(root: &Path, mut after_file: impl FnMut(&Path)) -> Result<String> {
-    let original_root = fingerprint(&fs::symlink_metadata(root)?)?;
+/// The lstat view of an item tree: the root plus every entry, sorted by name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Snapshot {
+    pub(crate) root: Fingerprint,
+    pub(crate) entries: Vec<Entry>,
+}
+pub(crate) fn snapshot(root: &Path) -> Result<Snapshot> {
+    let root_metadata = fingerprint(&fs::symlink_metadata(root)?)?;
     ensure!(
-        original_root.directory,
+        root_metadata.directory,
         "item root must be a real directory"
     );
     let mut entries = Vec::new();
     collect(root, root, &mut entries)?;
     entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+    Ok(Snapshot {
+        root: root_metadata,
+        entries,
+    })
+}
+/// Hash `root` from its snapshot `before`, failing unless the tree still
+/// matches it afterwards; returns the hash and that stable snapshot.
+pub(crate) fn hash_tree(
+    root: &Path,
+    before: Snapshot,
+    mut after_file: impl FnMut(&Path),
+) -> Result<(String, Snapshot)> {
     let mut hash = Sha256::new();
     hash.update(b"wpe-gallery-content-v1\0");
     let mut buffer = vec![0u8; 128 * 1024];
-    for entry in &entries {
+    for entry in &before.entries {
         hash.update(if entry.metadata.directory { b"D" } else { b"F" });
         hash.update((entry.name.len() as u64).to_be_bytes());
         hash.update(entry.name.as_bytes());
@@ -235,14 +306,8 @@ fn hash_with_hook(root: &Path, mut after_file: impl FnMut(&Path)) -> Result<Stri
             after_file(&entry.path);
         }
     }
-    let mut after = Vec::new();
-    collect(root, root, &mut after)?;
-    after.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
-    ensure!(
-        original_root == fingerprint(&fs::symlink_metadata(root)?)? && entries == after,
-        "item changed while hashing"
-    );
-    Ok(format!("{:x}", hash.finalize()))
+    ensure!(snapshot(root)? == before, "item changed while hashing");
+    Ok((format!("{:x}", hash.finalize()), before))
 }
 fn collect(root: &Path, directory: &Path, entries: &mut Vec<Entry>) -> Result<()> {
     for entry in fs::read_dir(directory)? {
@@ -283,11 +348,12 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         fs::write(d.path().join("a"), b"one").unwrap();
         let hash = content_hash(d.path()).unwrap();
+        let cache = HashCache::in_memory();
         let mut reviews = BTreeMap::from([("123".into(), review(hash.clone(), Verdict::Safe))]);
-        assert!(assess(&reviews, "123", d.path()).allowed);
-        assert!(!assess(&reviews, "456", d.path()).allowed);
+        assert!(assess(&reviews, "123", d.path(), Some(&cache)).allowed);
+        assert!(!assess(&reviews, "456", d.path(), Some(&cache)).allowed);
         fs::write(d.path().join("a"), b"two").unwrap();
-        assert!(!assess(&reviews, "123", d.path()).allowed);
+        assert!(!assess(&reviews, "123", d.path(), Some(&cache)).allowed);
         fs::write(d.path().join("a"), b"one").unwrap();
         fs::rename(d.path().join("a"), d.path().join("b")).unwrap();
         assert_ne!(hash, content_hash(d.path()).unwrap());
@@ -295,7 +361,35 @@ mod tests {
         fs::create_dir(d.path().join("empty")).unwrap();
         assert_ne!(hash, content_hash(d.path()).unwrap());
         reviews.get_mut("123").unwrap().verdict = Verdict::Blocked;
-        assert_eq!(assess(&reviews, "123", d.path()).label, "Blocked");
+        assert_eq!(
+            assess(&reviews, "123", d.path(), Some(&cache)).label,
+            "Blocked"
+        );
+    }
+    #[test]
+    fn parallel_map_delivers_each_index_once_and_stops_early() {
+        let items: Vec<usize> = (0..100).collect();
+        let mut seen = vec![0; items.len()];
+        parallel_map(
+            &items,
+            |n| n * 2,
+            |i, doubled| {
+                assert_eq!(doubled, i * 2);
+                seen[i] += 1;
+                true
+            },
+        );
+        assert!(seen.iter().all(|&n| n == 1));
+        let mut delivered = 0;
+        parallel_map(
+            &items,
+            |n| *n,
+            |_, _| {
+                delivered += 1;
+                delivered < 5
+            },
+        );
+        assert_eq!(delivered, 5);
     }
     #[test]
     fn duplicate_installs_fail_closed_in_gallery_and_launcher() {
@@ -308,9 +402,9 @@ mod tests {
             "123".into(),
             review(content_hash(&item(&roots[0])).unwrap(), Verdict::Safe),
         )]);
-        assert!(assess_installed(&reviews, "123", &item(&roots[0]), &roots).allowed);
+        assert!(assess_installed(&reviews, "123", &item(&roots[0]), &roots, None).allowed);
         fs::create_dir_all(item(&roots[1])).unwrap();
-        let status = assess_installed(&reviews, "123", &item(&roots[0]), &roots);
+        let status = assess_installed(&reviews, "123", &item(&roots[0]), &roots, None);
         assert!(!status.allowed);
         assert!(status.reason.contains("found 2"), "{}", status.reason);
         assert!(resolve_in("123", &roots).is_err());
@@ -327,7 +421,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         fs::write(d.path().join("a"), b"reviewed").unwrap();
         assert!(
-            hash_with_hook(d.path(), |path| {
+            hash_tree(d.path(), snapshot(d.path()).unwrap(), |path| {
                 fs::write(d.path().join("replacement"), b"modified").unwrap();
                 fs::rename(d.path().join("replacement"), path).unwrap();
             })

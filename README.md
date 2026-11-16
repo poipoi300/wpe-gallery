@@ -205,6 +205,20 @@ inspect other items; this does not permit applying them. Reload reviews after
 editing the file or after Steam updates. Verification runs off the UI thread;
 Apply always rereads the whitelist and rehashes, independently of cached badges.
 
+To keep startup fast, the gallery's badge pass caches hashes in
+`$XDG_CACHE_HOME/wpe-gallery/hashes.v1` (default `~/.cache/wpe-gallery/hashes.v1`,
+mode 0600). Each record holds the Workshop ID, canonical item path, a digest of
+the tree's lstat fingerprint (relative path, type, size, mtime, device, inode and
+ctime of every entry including the root) and the resulting content hash. An item
+is reread only when its fingerprint changes. Userland can restore mtime but not
+ctime, so an ordinary edit is rehashed even if its size and mtime are restored.
+The cache is used only on filesystems where the kernel owns ctime (ext4, btrfs,
+xfs, f2fs, tmpfs, bcachefs) and only for trees whose newest ctime predates
+hashing by two seconds. ctime is still not proof of unchanged bytes (writes
+through a shared mmap can skip it), so the cache only affects badges: Apply, the
+launcher and Recheck always hash the whole tree. Deleting the file is always
+safe; a corrupt or unwritable cache only costs a rehash.
+
 To compute a hash without approving or executing anything:
 
 ```sh

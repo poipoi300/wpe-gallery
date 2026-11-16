@@ -51,8 +51,9 @@ enum Update {
     Failed(String),
 }
 actions!(gallery, [Quit, Apply, Next, Previous, NextOutput]);
-/// Hash every item against the whitelist on a background thread. Results are
-/// streamed so progress and newly verified tiles appear as they finish.
+/// Check every item against the whitelist on a few background threads,
+/// reusing cached hashes of unchanged trees. Results are streamed so progress
+/// and newly verified tiles appear as they finish.
 fn verify_all(
     items: Vec<(String, PathBuf)>,
     sender: futures::channel::mpsc::UnboundedSender<Update>,
@@ -69,13 +70,27 @@ fn verify_all(
         }
     };
     let roots = library::libraries();
-    for (index, (id, directory)) in items.iter().enumerate() {
-        let status = safety::assess_installed(&reviews, id, directory, &roots);
-        if sender.unbounded_send(Update::Item(index, status)).is_err() {
-            return;
-        }
+    let cache = safety::HashCache::shared();
+    let mut open = true;
+    safety::parallel_map(
+        &items,
+        |(id, directory)| safety::assess_installed(&reviews, id, directory, &roots, Some(cache)),
+        |index, status| {
+            open = sender.unbounded_send(Update::Item(index, status)).is_ok();
+            open
+        },
+    );
+    if open {
+        let installed: std::collections::HashSet<&str> =
+            items.iter().map(|(id, _)| id.as_str()).collect();
+        cache.retain(|id| installed.contains(id));
     }
-    let _ = sender.unbounded_send(Update::Complete);
+    if let Err(e) = cache.flush() {
+        log::warn!("Cannot save hash cache: {e:#}");
+    }
+    if open {
+        let _ = sender.unbounded_send(Update::Complete);
+    }
 }
 impl Gallery {
     fn new(
@@ -219,16 +234,24 @@ impl Gallery {
             }
         }
     }
-    /// Re-read the whitelist and re-hash one item, e.g. after Apply refused it.
+    /// Re-read the whitelist and fully re-hash one item, bypassing the hash
+    /// cache, e.g. after Apply refused it.
     fn recheck(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(item) = self.items.get(index) else {
             return;
         };
         let (id, directory) = (item.id.clone(), item.directory.clone());
         let job = cx.background_executor().spawn(async move {
+            // The cached record may be what showed a stale Safe badge; drop it
+            // so the next verification pass rehashes this item too.
+            let cache = safety::HashCache::shared();
+            cache.retain(|cached| cached != id);
+            if let Err(e) = cache.flush() {
+                log::warn!("Cannot save hash cache: {e:#}");
+            }
             match safety::read_whitelist(&safety::whitelist_path()) {
                 Ok(reviews) => {
-                    safety::assess_installed(&reviews, &id, &directory, &library::libraries())
+                    safety::assess_installed(&reviews, &id, &directory, &library::libraries(), None)
                 }
                 Err(e) => safety::Status::unreviewed(format!("Could not load whitelist: {e:#}")),
             }
