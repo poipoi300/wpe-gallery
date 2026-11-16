@@ -1,5 +1,7 @@
 use wpe_gallery::{backend, library, renderer, safety};
+mod grid;
 mod preview;
+mod verification;
 use anyhow::Context as _;
 use backend::ApplyBackend;
 use gpui::{prelude::*, *};
@@ -7,6 +9,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
+use verification::Verification;
 struct Gallery {
     items: Vec<library::Wallpaper>,
     outputs: Vec<backend::Output>,
@@ -30,12 +33,15 @@ struct Gallery {
     visible: Vec<usize>,
     safe_only: bool,
     safety_task: Option<Task<()>>,
+    verification: Verification,
+    window: AnyWindowHandle,
 }
 actions!(gallery, [Quit, Apply, Next, Previous, NextOutput]);
 impl Gallery {
     fn new(
         items: Vec<library::Wallpaper>,
         outputs: Vec<backend::Output>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let selected = library::load_config(&library::config_path())
@@ -72,7 +78,27 @@ impl Gallery {
             visible: Vec::new(),
             safe_only: true,
             safety_task: None,
+            verification: Verification::Checking {
+                completed: 0,
+                total: count,
+            },
+            window: window.window_handle(),
         }
+    }
+    fn update_in_window(
+        view: &WeakEntity<Self>,
+        window: AnyWindowHandle,
+        cx: &mut AsyncApp,
+        update: impl FnOnce(&mut Self, &mut Context<Self>),
+    ) -> anyhow::Result<()> {
+        window.update(cx, |_, window, cx| {
+            let result = view.update(cx, |this, cx| {
+                update(this, cx);
+                cx.notify();
+            });
+            window.refresh();
+            result
+        })?
     }
     fn rebuild_visible(&mut self, cx: &mut Context<Self>) {
         self.visible = (0..self.items.len())
@@ -98,36 +124,71 @@ impl Gallery {
     }
     fn refresh_safety(&mut self, cx: &mut Context<Self>) {
         self.safety_task.take();
+        self.verification = Verification::Checking {
+            completed: 0,
+            total: self.items.len(),
+        };
         self.safety = vec![safety::Status::unreviewed("Checking reviews…"); self.items.len()];
         self.rebuild_visible(cx);
         let items = self.items.clone();
         let (sender, mut receiver) = futures::channel::mpsc::unbounded();
+        enum Update {
+            Item(usize, safety::Status),
+            Complete,
+            Failed(String),
+        }
         let worker = cx.background_executor().spawn(async move {
-            let reviews = safety::read_whitelist(&safety::whitelist_path())
-                .map_err(|e| format!("Whitelist unavailable: {e:#}"));
+            let reviews = match safety::read_whitelist(&safety::whitelist_path()) {
+                Ok(reviews) => reviews,
+                Err(error) => {
+                    let _ = sender.unbounded_send(Update::Failed(format!(
+                        "Could not load whitelist {}: {error:#}",
+                        safety::whitelist_path().display()
+                    )));
+                    return;
+                }
+            };
             for (index, item) in items.iter().enumerate() {
                 if sender.is_closed() {
-                    break;
+                    return;
                 }
-                let status = match &reviews {
-                    Ok(reviews) => safety::assess(reviews, &item.id, &item.directory),
-                    Err(reason) => safety::Status::unreviewed(reason.clone()),
-                };
-                if sender.unbounded_send((index, status)).is_err() {
-                    break;
+                let status = safety::assess(&reviews, &item.id, &item.directory);
+                if sender.unbounded_send(Update::Item(index, status)).is_err() {
+                    return;
                 }
             }
+            let _ = sender.unbounded_send(Update::Complete);
         });
+        let window = self.window;
         self.safety_task = Some(cx.spawn(async move |this, cx| {
             use futures::StreamExt;
             let _worker = worker;
-            while let Some((index, status)) = receiver.next().await {
-                if this
-                    .update(cx, |this, cx| {
-                        this.safety[index] = status;
-                        this.rebuild_visible(cx);
-                    })
-                    .is_err()
+            while let Some(update) = receiver.next().await {
+                if Self::update_in_window(&this, window, cx, |this, cx| {
+                    match update {
+                        Update::Item(index, status) => {
+                            this.safety[index] = status;
+                            if let Verification::Checking { completed, .. } = &mut this.verification
+                            {
+                                *completed += 1;
+                            }
+                        }
+                        Update::Complete => {
+                            this.verification = Verification::Ready;
+                            eprintln!(
+                                "Whitelist verification complete: {} of {} wallpapers safe",
+                                this.safety.iter().filter(|s| s.allowed).count(),
+                                this.items.len()
+                            );
+                        }
+                        Update::Failed(error) => {
+                            eprintln!("{error}");
+                            this.verification = Verification::Failed(error);
+                        }
+                    }
+                    this.rebuild_visible(cx);
+                })
+                .is_err()
                 {
                     break;
                 }
@@ -162,9 +223,10 @@ impl Gallery {
         if let Some(path) = self.items.get(index).and_then(|i| i.preview.clone())
             && let Some(receiver) = self.pool.request(path, true)
         {
+            let window = self.window;
             self.large_task = Some(cx.spawn(async move |this, cx| {
                 if let Ok(result) = receiver.await {
-                    _ = this.update(cx, |this, cx| {
+                    _ = Self::update_in_window(&this, window, cx, |this, cx| {
                         if this.generation == generation {
                             match result {
                                 Ok(image) => this.large = Some(image),
@@ -189,9 +251,10 @@ impl Gallery {
             && let Some(receiver) = self.pool.request(path, false)
         {
             self.pending.insert(index);
+            let window = self.window;
             cx.spawn(async move |this, cx| {
                 if let Ok(result) = receiver.await {
-                    _ = this.update(cx, |this, cx| {
+                    _ = Self::update_in_window(&this, window, cx, |this, cx| {
                         this.pending.remove(&index);
                         this.thumbnails.insert(index, result.ok());
                         this.lru.push_back(index);
@@ -237,9 +300,10 @@ impl Gallery {
                 .map(|_| output)
                 .map_err(|e| e.to_string())
         });
+        let window = self.window;
         cx.spawn(async move |this, cx| {
             let result = job.await;
-            _ = this.update(cx, |this, cx| {
+            _ = Self::update_in_window(&this, window, cx, |this, cx| {
                 this.busy = false;
                 if result.is_err() {
                     this.refresh_safety(cx);
@@ -268,11 +332,10 @@ fn button(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<D
 }
 impl Render for Gallery {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let columns =
-            (((f32::from(window.bounds().size.width) - 388.) / 190.).floor() as usize).clamp(1, 12);
-        self.cache_limit =
-            (columns * ((f32::from(window.bounds().size.height) / 164.).ceil() as usize + 3) + 64)
-                .max(128);
+        let viewport = window.viewport_size();
+        let grid = grid::GridLayout::new(viewport.width.into(), viewport.height.into());
+        let columns = grid.columns;
+        self.cache_limit = grid.cache_limit;
         if columns != self.last_columns {
             self.scroll_selection = true;
             self.last_columns = columns;
@@ -289,10 +352,7 @@ impl Render for Gallery {
             self.scroll_selection = false;
         }
         let rows = self.visible.len().div_ceil(columns);
-        let tile_width =
-            ((f32::from(window.bounds().size.width) - 372. - 12. * (columns - 1) as f32)
-                / columns as f32)
-                .max(80.);
+        let tile_width = grid.tile_width;
         let mut top = div()
             .flex()
             .items_center()
@@ -436,48 +496,199 @@ impl Render for Gallery {
         } else {
             details = details.child("Select a wallpaper to see its details.");
         }
-        div().track_focus(&self.focus).key_context("Gallery").size_full().flex().flex_col().bg(rgb(0x181b20))
-
-            .font_family("sans-serif").text_sm().text_color(rgb(0xedf0f4))
-            .on_action(|_: &Quit,_,cx|cx.quit())
-            .on_action(cx.listener(|this,_:&Apply,_,cx|this.apply(cx)))
-            .on_action(cx.listener(|this,_:&Next,_,cx|this.move_selection(true,cx)))
-            .on_action(cx.listener(|this,_:&Previous,_,cx|this.move_selection(false,cx)))
-            .on_action(cx.listener(|this,_:&NextOutput,_,cx|if !this.outputs.is_empty(){this.output=(this.output+1)%this.outputs.len();cx.notify();}))
+        div()
+            .track_focus(&self.focus)
+            .key_context("Gallery")
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(0x181b20))
+            .font_family("sans-serif")
+            .text_sm()
+            .text_color(rgb(0xedf0f4))
+            .on_action(|_: &Quit, _, cx| cx.quit())
+            .on_action(cx.listener(|this, _: &Apply, _, cx| this.apply(cx)))
+            .on_action(cx.listener(|this, _: &Next, _, cx| this.move_selection(true, cx)))
+            .on_action(cx.listener(|this, _: &Previous, _, cx| this.move_selection(false, cx)))
+            .on_action(cx.listener(|this, _: &NextOutput, _, cx| {
+                if !this.outputs.is_empty() {
+                    this.output = (this.output + 1) % this.outputs.len();
+                    cx.notify();
+                }
+            }))
             .child(top)
-            .child(div().flex().items_center().gap_3().px_4().py_2()
-                .child(button("safe-filter",if self.safe_only {"Safe only: on"} else {"Safe only: off"})
-                    .on_click(cx.listener(|this,_,_,cx| {this.safe_only = !this.safe_only;this.rebuild_visible(cx);})))
-                .child(button("refresh-reviews","Reload reviews").on_click(cx.listener(|this,_,_,cx|this.refresh_safety(cx))))
-                .child("Only reviewed, unchanged items can be applied."))
-            .child(div().flex().flex_1().min_h_0()
-                .child(div().flex_1().min_w_0().h_full().flex().flex_col().p_4().gap_3()
-                    .child(div().flex().justify_between().child(format!("Installed wallpapers  ·  {} of {}",self.visible.len(),self.items.len())).child(div().text_color(rgb(0xb6beca)).child("← → Select   ·   Tab Display   ·   Enter Apply")))
-                    .when(self.visible.is_empty(),|s|s.child(if self.items.is_empty() {"No wallpapers found. Download Workshop items through Steam, then reopen."} else {"No verified safe wallpapers. Add reviewed entries to whitelist.json and reload reviews, or turn Safe only off to inspect unreviewed items."}))
-                    .child(uniform_list("wallpapers",rows,cx.processor(move |this,range: std::ops::Range<usize>,_,cx| {
-                        range.map(|row| {
-                            let mut line = div().flex().gap_3().h(px(164.)).pb_3();
-                            for position in row*columns..((row+1)*columns).min(this.visible.len()) {
-                                let index=this.visible[position];
-                                let source = this.thumb(index,cx);
-                                let item = &this.items[index];
-                                let mut tile = div().id(("tile",index)).w(px(tile_width)).flex_shrink_0().min_w_0().h_full().flex().flex_col()
-                                    .bg(rgb(0x22262d)).border_2().border_color(if index == this.selected {rgb(0x569dff)}else{rgb(0x303741)})
-                                    .cursor_pointer().hover(|s|s.bg(rgb(0x303741)))
-                                    .on_mouse_down(MouseButton::Left,cx.listener(move |this,_,_,cx| {
-                                        this.select(index,cx);cx.stop_propagation();
-                                    }));
-                                let mut artwork = div().w_full().h(px(92.)).bg(rgb(0x121519)).overflow_hidden().flex().items_center().justify_center();
-                                if let Some(source) = source { artwork = artwork.child(img(source).size_full().object_fit(ObjectFit::Cover)); }
-                                else { artwork = artwork.child("No preview"); }
-                                tile = tile.child(artwork).child(div().px_2().text_xs().text_color(rgb(0xb6beca)).child(this.safety[index].label)).child(div().px_2().py_1().truncate().child(item.title.clone()));
-                                line = line.child(tile);
-                            }
-                            line
-                        }).collect()
-                    })).track_scroll(self.scroll.clone()).flex_1().min_h_0()))
-                .child(details))
-            .child(div().px_4().py_2().min_h(px(34.)).bg(rgb(0x22262d)).child(self.status.clone()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_2()
+                    .child(
+                        button(
+                            "safe-filter",
+                            if self.safe_only {
+                                "Safe only: on"
+                            } else {
+                                "Safe only: off"
+                            },
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.safe_only = !this.safe_only;
+                            this.rebuild_visible(cx);
+                        })),
+                    )
+                    .child(
+                        button("refresh-reviews", "Reload reviews")
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_safety(cx))),
+                    )
+                    .child("Only reviewed, unchanged items can be applied."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .p_4()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .child(format!(
+                                        "Installed wallpapers  ·  {} of {}",
+                                        self.visible.len(),
+                                        self.items.len()
+                                    ))
+                                    .child(
+                                        div().text_color(rgb(0xb6beca)).child(
+                                            "← → Select   ·   Tab Display   ·   Enter Apply",
+                                        ),
+                                    ),
+                            )
+                            .when(self.visible.is_empty(), |s| {
+                                s.child(self.verification.empty_message(!self.items.is_empty()))
+                            })
+                            .when(!self.visible.is_empty(), |s| {
+                                s.when_some(self.verification.progress(), |s, message| {
+                                    s.child(message)
+                                })
+                                .when(matches!(self.verification, Verification::Failed(_)), |s| {
+                                    s.child(self.verification.empty_message(true))
+                                })
+                            })
+                            .child(
+                                uniform_list(
+                                    "wallpapers",
+                                    rows,
+                                    cx.processor(
+                                        move |this, range: std::ops::Range<usize>, _, cx| {
+                                            range
+                                                .map(|row| {
+                                                    let mut line =
+                                                        div().flex().gap_3().h(px(164.)).pb_3();
+                                                    for position in row * columns
+                                                        ..((row + 1) * columns)
+                                                            .min(this.visible.len())
+                                                    {
+                                                        let index = this.visible[position];
+                                                        let source = this.thumb(index, cx);
+                                                        let item = &this.items[index];
+                                                        let mut tile = div()
+                                                            .id(("tile", index))
+                                                            .w(px(tile_width))
+                                                            .flex_shrink_0()
+                                                            .min_w_0()
+                                                            .h_full()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .bg(rgb(0x22262d))
+                                                            .border_2()
+                                                            .border_color(
+                                                                if index == this.selected {
+                                                                    rgb(0x569dff)
+                                                                } else {
+                                                                    rgb(0x303741)
+                                                                },
+                                                            )
+                                                            .cursor_pointer()
+                                                            .hover(|s| s.bg(rgb(0x303741)))
+                                                            .on_mouse_down(
+                                                                MouseButton::Left,
+                                                                cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        this.select(index, cx);
+                                                                        cx.stop_propagation();
+                                                                    },
+                                                                ),
+                                                            );
+                                                        let mut artwork = div()
+                                                            .w_full()
+                                                            .h(px(92.))
+                                                            .bg(rgb(0x121519))
+                                                            .overflow_hidden()
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center();
+                                                        if let Some(source) = source {
+                                                            artwork = artwork.child(
+                                                                img(source)
+                                                                    .size_full()
+                                                                    .object_fit(ObjectFit::Cover),
+                                                            );
+                                                        } else {
+                                                            artwork = artwork.child("No preview");
+                                                        }
+                                                        tile = tile
+                                                            .child(artwork)
+                                                            .child(
+                                                                div()
+                                                                    .px_2()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(0xb6beca))
+                                                                    .child(
+                                                                        this.safety[index].label,
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .px_2()
+                                                                    .py_1()
+                                                                    .truncate()
+                                                                    .child(item.title.clone()),
+                                                            );
+                                                        line = line.child(tile);
+                                                    }
+                                                    line
+                                                })
+                                                .collect()
+                                        },
+                                    ),
+                                )
+                                .with_sizing_behavior(ListSizingBehavior::Auto)
+                                .w_full()
+                                .track_scroll(self.scroll.clone())
+                                .flex_1()
+                                .min_h_0(),
+                            ),
+                    )
+                    .child(details),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .py_2()
+                    .min_h(px(34.))
+                    .bg(rgb(0x22262d))
+                    .child(self.status.clone()),
+            )
     }
 }
 fn main() -> anyhow::Result<()> {
@@ -548,10 +759,16 @@ fn main() -> anyhow::Result<()> {
             },
             |window, cx| {
                 cx.new(|cx| {
-                    let mut gallery = Gallery::new(items, outputs, cx);
+                    let mut gallery = Gallery::new(items, outputs, window, cx);
                     if let Some(index) = initial {
                         gallery.selected = index;
                     }
+                    cx.observe_window_bounds(window, |this, window, cx| {
+                        this.scroll_selection = true;
+                        cx.notify();
+                        window.refresh();
+                    })
+                    .detach();
                     gallery.focus.focus(window);
                     gallery.refresh_safety(cx);
                     gallery

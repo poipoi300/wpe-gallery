@@ -243,3 +243,27 @@ The environment JSON must specify the test compositor's WAYLAND_DISPLAY and
 SWAYSOCK. The test refuses non-HEADLESS outputs, uses synthetic wallpapers and a
 mock systemctl, and stops its app and virtual pointer afterwards. The caller owns
 compositor teardown. Do not point it at a live desktop.
+
+
+Initial tiled-window repaint regression (requires Pillow in addition to the GUI
+test tools):
+
+```sh
+python3 tests/gui_startup.py /private/path/nested-niri-env.json
+```
+
+Start headless sway in a private XDG_RUNTIME_DIR (mode 0700), unset inherited
+WAYLAND_DISPLAY, DISPLAY and NIRI_SOCKET, then start nested niri inside that sway.
+Use a fractional-scale output and a normal initial column, for example
+`output "winit" { scale 1.25; }` and
+`layout { default-column-width { fixed 1331; }; }`.
+Pass the nested compositor's environment JSON. The test verifies the app's
+runtime and sockets before screenshots, waits for an asynchronous hash check to
+finish without resizing, asserts painted thumbnails, then exercises column
+resize and fullscreen/return. It also captures a malformed-whitelist diagnostic.
+Stop both test compositors afterwards. No test should use the live runtime.
+
+During verification the gallery shows `Verifying N wallpapers…` with progress.
+A whitelist read/parse failure shows the full path and diagnostic in the gallery;
+it does not display the completed-but-empty safe-library message. Reload reviews
+after correcting the file.

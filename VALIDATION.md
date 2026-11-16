@@ -53,3 +53,20 @@ for hidden/Unicode file names and empty directories. Three real reviewed hashes
 were also checked read-only against the user's private whitelist; no review
 entries or private data are included here. Independent security review cleared
 the hash-contract and file-replacement findings after their fixes.
+
+
+## v0.2.2 startup repaint
+
+The private-runtime headless sway + nested niri regression starts the gallery in
+a 1331-logical-pixel column at scale 1.25. A synthetic 4 GiB sparse file keeps
+verification running beyond the first configure/paint. The initial capture shows
+Verifying, and the completion capture contains thumbnails without any intervening
+resize or input. Subsequent same-column-count resize and fullscreen/return keep
+tiles painted. Broken-whitelist capture shows its path and parse diagnostic.
+
+The reported 0.2.1 failure was not reproduced with these synthetic fixtures.
+The completion paths now update through the owning window and explicitly request
+a repaint, while list height comes from its flex viewport even when initially
+empty. Geometry uses the configured content viewport and observes configure
+changes. Non-GUI tests cover first-configure geometry and distinct checking,
+failed and completed empty states.

@@ -8,6 +8,11 @@ repo = pathlib.Path(__file__).resolve().parents[1]
 env = json.loads(pathlib.Path(sys.argv[1]).read_text())
 binary = pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else repo / "target/release/wpe-gallery").resolve()
 assert env.get("WAYLAND_DISPLAY") and env.get("SWAYSOCK"), "Explicit isolated compositor environment required"
+runtime=pathlib.Path(env["XDG_RUNTIME_DIR"]).resolve()
+assert runtime != pathlib.Path(f"/run/user/{os.getuid()}"), "Private runtime required"
+assert runtime.stat().st_mode & 0o777 == 0o700
+assert pathlib.Path(env["SWAYSOCK"]).parent.resolve() == runtime
+assert (runtime / env["WAYLAND_DISPLAY"]).is_socket()
 outputs = json.loads(subprocess.check_output(["swaymsg", "-t", "get_outputs"], env=env))
 assert outputs and all(o["name"].startswith("HEADLESS-") for o in outputs), "Refusing a non-headless compositor"
 out = next(o for o in outputs if o["name"] == "HEADLESS-1")
@@ -45,6 +50,9 @@ subprocess.run(["clang", "-I"+str(artifact), str(repo / "tests/wayland/pointer-d
 pointer = subprocess.Popen([str(artifact / "pointer-device")], env=env, stdout=subprocess.PIPE, text=True)
 assert pointer.stdout.readline().strip() == "ready"
 app = subprocess.Popen([str(binary)], env=env, stdout=open(artifact / "app.log", "w"), stderr=subprocess.STDOUT)
+data=pathlib.Path(f"/proc/{app.pid}/environ").read_bytes().split(b"\0")
+for key in ["XDG_RUNTIME_DIR","WAYLAND_DISPLAY"]:
+    assert (key+"="+env[key]).encode() in data
 def ipc(*args):
     subprocess.run(["swaymsg", *args], env=env, check=True, stdout=subprocess.DEVNULL)
 def click(x, y, hold=.15):
