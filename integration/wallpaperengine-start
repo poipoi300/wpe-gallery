@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Launch one renderer for every assignment, falling back to wallpaper.env."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+def arguments():
+    config_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    config = config_dir / "linux-wallpaperengine" / "assignments.json"
+    assignments = {}
+    if config.exists():
+        data = json.loads(config.read_text())
+        if data.get("version") != 1:
+            raise ValueError("unsupported assignments version")
+        assignments = data["outputs"]
+        if not isinstance(assignments, dict) or not assignments:
+            raise ValueError("assignments must contain at least one output")
+    else:
+        # systemd supplies wallpaper.env; retain its original single-screen contract.
+        output = os.environ.get("WPE_OUTPUT", "")
+        if not output:
+            outputs = json.loads(subprocess.check_output(
+                ["niri", "msg", "--json", "outputs"], text=True))
+            names = sorted(n for n, o in outputs.items()
+                           if o.get("current_mode") is not None)
+            output = names[0] if names else ""
+        if not output:
+            raise ValueError("no enabled output")
+        assignments[output] = {"wallpaper_id": os.environ.get("WPE_BG", "")}
+
+    fps = os.environ.get("WPE_FPS", "30")
+    if not fps.isdecimal() or not 1 <= int(fps) <= 1000:
+        raise ValueError("WPE_FPS must be between 1 and 1000")
+    args = ["/usr/bin/linux-wallpaperengine", "--silent", "--fps", fps,
+            "--fullscreen-pause-only-active", "--scaling", "fill"]
+    for output, assignment in sorted(assignments.items()):
+        wallpaper = assignment["wallpaper_id"]
+        if not isinstance(output, str) or not output or output.startswith("-"):
+            raise ValueError("invalid output name")
+        if not isinstance(wallpaper, str) or not wallpaper.isascii() or not wallpaper.isdecimal():
+            raise ValueError("invalid wallpaper ID")
+        if assignment.get("properties"):
+            # Upstream --set-property currently has process-wide scope, not per-output.
+            raise ValueError("per-wallpaper properties are reserved, not supported yet")
+        args.extend(["--screen-root", output, "--bg", wallpaper, "--scaling", "fill"])
+    return args
+
+
+if __name__ == "__main__":
+    try:
+        args = arguments()
+        os.execv(args[0], args)
+    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
+        print(f"wallpaperengine-start: {error}", file=sys.stderr)
+        sys.exit(1)

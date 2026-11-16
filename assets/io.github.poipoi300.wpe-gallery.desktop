@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=WPE Gallery
+Comment=Choose installed Wallpaper Engine wallpapers
+Exec=wpe-gallery
+Icon=io.github.poipoi300.wpe-gallery
+Terminal=false
+Categories=Utility;Graphics;
+StartupWMClass=io.github.poipoi300.wpe-gallery

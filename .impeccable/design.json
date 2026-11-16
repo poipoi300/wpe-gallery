@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-16T01:11:54.760729+00:00",
+  "title": "Design System: WPE Gallery",
+  "extensions": {
+    "typographyMeta": {
+      "body": {
+        "displayName": "Body",
+        "purpose": "Tile titles, metadata, controls, and descriptions."
+      },
+      "app-title": {
+        "displayName": "App title",
+        "purpose": "Persistent application identity."
+      },
+      "wallpaper-title": {
+        "displayName": "Wallpaper title",
+        "purpose": "Selected wallpaper heading."
+      }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Apply button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Primary action; native GPUI styling represented for documentation.",
+      "html": "<button class=\"ds-apply\">Apply wallpaper</button>",
+      "css": ".ds-apply{font:400 14px sans-serif;color:#edf0f4;border:0;border-radius:2px;padding:8px 16px;cursor:pointer;background:#2866ad}.ds-apply:hover{background:#414c5b}.ds-apply:disabled{opacity:.5;cursor:default}"
+    },
+    {
+      "name": "Secondary button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Shared output-control styling.",
+      "html": "<button class=\"ds-secondary\">DP-1   2560 \u00d7 1440</button>",
+      "css": ".ds-secondary{font:400 14px sans-serif;color:#edf0f4;border:0;border-radius:2px;padding:8px 16px;cursor:pointer;background:#303741}.ds-secondary:hover{background:#414c5b}"
+    },
+    {
+      "name": "Selected display",
+      "kind": "nav",
+      "refersTo": "display-selected",
+      "description": "Current Apply target, shown by output name and pixel resolution.",
+      "html": "<button class=\"ds-display\">DP-1   2560 \u00d7 1440</button>",
+      "css": ".ds-display{font:400 14px sans-serif;color:#edf0f4;border:0;border-radius:2px;padding:8px 16px;cursor:pointer;background:#325c8a}.ds-display:hover{background:#414c5b}"
+    },
+    {
+      "name": "Tag",
+      "kind": "chip",
+      "refersTo": "tag",
+      "description": "Informational Workshop tag without click behavior.",
+      "html": "<span class=\"ds-tag\">Technology</span>",
+      "css": ".ds-tag{display:inline-block;font:400 14px sans-serif;color:#edf0f4;background:#303741;border-radius:2px;padding:4px 8px}"
+    },
+    {
+      "name": "Selected wallpaper tile",
+      "kind": "card",
+      "refersTo": "wallpaper-tile",
+      "description": "Square preview tile with a selected outline and single-line title.",
+      "html": "<div class=\"ds-tile\"><div class=\"ds-artwork\">No preview</div><div class=\"ds-title\">Wallpaper title</div></div>",
+      "css": ".ds-tile{width:220px;border:2px solid #569dff;background:#22262d;color:#edf0f4;font:400 14px sans-serif;cursor:pointer}.ds-tile:hover{background:#303741}.ds-artwork{height:112px;background:#121519;display:flex;align-items:center;justify-content:center}.ds-title{padding:4px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Native gallery",
+    "overview": "The Windows Wallpaper Engine composition is the user's visual reference.\nA graphite work surface, compact system sans typography, and blue selection\nkeep the controls quiet while wallpaper artwork carries the color.",
+    "keyCharacteristics": [
+      "Dense artwork browsing with titles immediately beneath previews.",
+      "Persistent display selection and a separate details pane.",
+      "Blue identifies selection and the Apply action."
+    ],
+    "rules": [
+      {
+        "name": "The Artwork Leads Rule",
+        "body": "Keep interface color concentrated in selection and\nactions so installed wallpaper previews remain the visual content.",
+        "section": "colors"
+      }
+    ],
+    "dos": [
+      "Do keep artwork, its title, and selection state visually adjacent.",
+      "Do use the existing tonal surfaces and blue action hierarchy.",
+      "Do preserve visible loading, disabled, empty, and error feedback."
+    ],
+    "donts": [
+      "Don't animate every gallery tile.",
+      "Don't let long Workshop titles widen their gallery column.",
+      "Don't present informational tags as working filters."
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+[package]
+name = "wpe-gallery"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A GPUI gallery for Wallpaper Engine wallpapers on Linux"
+repository = "https://github.com/poipoi300/wpe-gallery"
+
+[dependencies]
+gpui = "0.2.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+directories = "6"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+tempfile = "3"
+
+
+[profile.release]
+debug = 0
+
+[dependencies.futures]
+version = "0.3"
+[dependencies.smallvec]
+version = "1"
+
+# GPUI 0.2.2's tar client uses xattr 0.2.3; current libc removed Linux ENOATTR.
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
