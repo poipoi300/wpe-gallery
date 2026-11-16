@@ -77,7 +77,7 @@ try:
     click(3900, APPLY_Y)
     assignment = config / "linux-wallpaperengine/assignments.json"
     assert json.loads(assignment.read_text())["outputs"]["HEADLESS-1"]["wallpaper_id"] == "1002"
-    assert (artifact / "systemctl.log").read_text().strip() == "--user restart linux-wallpaperengine.service"
+    assert (artifact / "systemctl.log").read_text().strip() == "--user reload-or-restart linux-wallpaperengine.service"
     # Title click selects the first safe item.
     click(100, 235)
     click(3900, APPLY_Y)

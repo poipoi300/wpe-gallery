@@ -4,6 +4,8 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use std::{collections::BTreeMap, fs, path::PathBuf};
+#[cfg(target_os = "linux")]
+mod supervisor;
 
 fn previous_path() -> PathBuf {
     library::config_path().with_file_name("last-safe-assignments.json")
@@ -126,17 +128,13 @@ pub fn arguments(record: bool) -> Result<Vec<String>> {
     }
     Ok(args)
 }
+/// Runs the renderer under the make-before-break supervisor (see `supervisor`).
 pub fn launch() -> Result<()> {
-    let args = arguments(true)?;
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
-        use std::os::unix::process::CommandExt;
-        Err(std::process::Command::new(&args[0])
-            .args(&args[1..])
-            .exec()
-            .into())
+        supervisor::launch()
     }
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     {
         anyhow::bail!("Linux renderer launch is unsupported on this platform")
     }

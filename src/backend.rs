@@ -18,13 +18,19 @@ impl ApplyBackend for Platform {
         );
         crate::safety::verify(wallpaper)?;
         crate::library::save_assignment(&crate::library::config_path(), output, wallpaper)?;
+        // Reload swaps renderers without a bare-background gap; units without
+        // ExecReload, or not running, are restarted instead.
         let result = std::process::Command::new("systemctl")
-            .args(["--user", "restart", "linux-wallpaperengine.service"])
+            .args([
+                "--user",
+                "reload-or-restart",
+                "linux-wallpaperengine.service",
+            ])
             .output()
             .context("start systemctl")?;
         anyhow::ensure!(
             result.status.success(),
-            "Assignment saved, but service restart failed: {}",
+            "Assignment saved, but service reload failed: {}",
             String::from_utf8_lossy(&result.stderr)
         );
         Ok(())

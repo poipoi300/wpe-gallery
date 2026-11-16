@@ -15,7 +15,7 @@ Wallpaper Engine (app 431960), its assets, and downloaded Workshop items.
 - JPEG/PNG/WebP thumbnails; selected GIF animation.
 - Wayland output names and native resolutions, with niri JSON fallback.
 - Persistent independent output assignments; one renderer process for all outputs.
-- Atomic configuration writes and asynchronous systemd user-service restart.
+- Atomic configuration writes; seamless renderer swap through a systemd reload.
 
 The layout follows the familiar display strip, wallpaper grid and right-hand
 details pane. The gallery is deliberately local-only in v0.2: no Workshop
@@ -110,6 +110,27 @@ The properties map is reserved. Upstream currently treats --set-property globall
 the launcher rejects nonempty maps instead of misapplying one output's values to
 all wallpapers. Service-start success does not guarantee a wallpaper will render:
 inspect `journalctl --user -u linux-wallpaperengine.service` for renderer failures.
+
+### Seamless swap
+
+`wpe-gallery-launch` stays the unit's main process and supervises the renderer.
+Apply runs `systemctl --user reload-or-restart linux-wallpaperengine.service`;
+with the sample unit's `ExecReload`, SIGHUP makes the launcher re-verify every
+assignment, start a second renderer, and kill the old one only after the new
+one has presented frames. niri and wlroots stack the newer layer surface on top,
+so every output goes straight from the old wallpaper to the new one, with no bare
+background in between. Readiness is the renderer's own `--screenshot` file in a
+private temporary directory; after 15 s without it (for example, paused behind a
+fullscreen window) the old renderer is replaced anyway. A replacement that exits
+before presenting leaves the current renderer running and is logged; a reload in
+which no assignment verifies stops the renderer, as a restart would. Units without
+`ExecReload` are restarted. The reload needs wpe-gallery 0.2.5 or newer; with
+an older exec-style launcher the renderer exits on SIGHUP and the unit restarts
+it, with the old gap.
+`wallpaper.env` is read when the unit starts, so restart the unit after
+editing it. Video wallpapers draw black until their first
+decoded frame (about 0.6 s), which the swap cannot hide because the new surface
+is on top.
 
 ## Preview resource budget
 

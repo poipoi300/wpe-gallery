@@ -8,8 +8,20 @@ EnvironmentFile=-%h/.config/linux-wallpaperengine/wallpaper.env
 # Threaded GL optimisations off: documented workaround for NVIDIA GL errors.
 Environment=__GL_THREADED_OPTIMIZATIONS=0
 ExecStart=%h/.local/bin/wallpaperengine-start
+# wpe-gallery-launch stays the main process and supervises the renderer.
+# Reload (used by Apply) starts the newly verified renderer first and kills
+# the old one once the new one presents, so no bare background shows.
+# Needs wpe-gallery 0.2.5 or newer (an older exec-style launcher exits on
+# SIGHUP and is restarted, with a gap); wallpaper.env is read on start only.
+ExecReload=/usr/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
+# A SIGHUP that lands before the launcher blocks it ends the process "cleanly".
+RestartForceExitStatus=SIGHUP
+# Stop signals only the launcher, which SIGKILLs its renderers: the renderer
+# itself sometimes ignores SIGTERM.
+KillMode=mixed
+TimeoutStopSec=5
 
 [Install]
 WantedBy=niri.service

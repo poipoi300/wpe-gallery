@@ -1,4 +1,5 @@
 #!/bin/sh
 # A dedicated non-GUI helper shares the gallery's whitelist verification.
-# Missing helpers (before upgrading to 0.2) fail closed.
+# Missing helpers (before upgrading to 0.2) fail closed. The helper stays
+# running as the renderer supervisor; SIGHUP swaps in a re-verified renderer.
 exec /usr/bin/wpe-gallery-launch
