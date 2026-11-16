@@ -50,6 +50,10 @@ subprocess.run(["clang", "-I"+str(artifact), str(repo / "tests/wayland/pointer-d
 pointer = subprocess.Popen([str(artifact / "pointer-device")], env=env, stdout=subprocess.PIPE, text=True)
 assert pointer.stdout.readline().strip() == "ready"
 app = subprocess.Popen([str(binary)], env=env, stdout=open(artifact / "app.log", "w"), stderr=subprocess.STDOUT)
+# /proc/PID/environ is the parent's until exec completes.
+for _ in range(100):
+    if os.readlink(f"/proc/{app.pid}/exe") == str(binary): break
+    time.sleep(.02)
 data=pathlib.Path(f"/proc/{app.pid}/environ").read_bytes().split(b"\0")
 for key in ["XDG_RUNTIME_DIR","WAYLAND_DISPLAY"]:
     assert (key+"="+env[key]).encode() in data

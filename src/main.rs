@@ -4,9 +4,11 @@ mod preview;
 mod verification;
 use anyhow::Context as _;
 use backend::ApplyBackend;
+use futures::StreamExt as _;
 use gpui::{prelude::*, *};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    path::PathBuf,
     sync::Arc,
 };
 use verification::Verification;
@@ -19,7 +21,11 @@ struct Gallery {
     busy: bool,
     pool: preview::Pool,
     thumbnails: HashMap<usize, Option<Arc<RenderImage>>>,
-    pending: HashSet<usize>,
+    // In-flight thumbnail decodes. Dropping a task cancels its queued decode.
+    thumbnail_tasks: HashMap<usize, Task<()>>,
+    // Indices the grid asked for since the last render; decodes for anything
+    // else (scrolled away) are cancelled at the next render.
+    requested: HashSet<usize>,
     lru: VecDeque<usize>,
     large: Option<Arc<RenderImage>>,
     generation: usize,
@@ -33,26 +39,57 @@ struct Gallery {
     visible: Vec<usize>,
     safe_only: bool,
     safety_task: Option<Task<()>>,
+    recheck_tasks: HashMap<usize, Task<()>>,
     verification: Verification,
-    window: AnyWindowHandle,
+    #[cfg(test)]
+    renders: usize,
+}
+/// Messages from the verification worker to the gallery.
+enum Update {
+    Item(usize, safety::Status),
+    Complete,
+    Failed(String),
 }
 actions!(gallery, [Quit, Apply, Next, Previous, NextOutput]);
+/// Hash every item against the whitelist on a background thread. Results are
+/// streamed so progress and newly verified tiles appear as they finish.
+fn verify_all(
+    items: Vec<(String, PathBuf)>,
+    sender: futures::channel::mpsc::UnboundedSender<Update>,
+) {
+    let path = safety::whitelist_path();
+    let reviews = match safety::read_whitelist(&path) {
+        Ok(reviews) => reviews,
+        Err(error) => {
+            let _ = sender.unbounded_send(Update::Failed(format!(
+                "Could not load whitelist {}: {error:#}",
+                path.display()
+            )));
+            return;
+        }
+    };
+    let roots = library::libraries();
+    for (index, (id, directory)) in items.iter().enumerate() {
+        let status = safety::assess_installed(&reviews, id, directory, &roots);
+        if sender.unbounded_send(Update::Item(index, status)).is_err() {
+            return;
+        }
+    }
+    let _ = sender.unbounded_send(Update::Complete);
+}
 impl Gallery {
     fn new(
         items: Vec<library::Wallpaper>,
         outputs: Vec<backend::Output>,
-        window: &mut Window,
+        initial: Option<usize>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let selected = library::load_config(&library::config_path())
-            .ok()
-            .and_then(|c| {
-                outputs
-                    .first()
-                    .and_then(|o| c.outputs.get(&o.name))
-                    .map(|a| a.wallpaper_id.clone())
+        let selected = initial
+            .or_else(|| {
+                let config = library::load_config(&library::config_path()).ok()?;
+                let id = &config.outputs.get(&outputs.first()?.name)?.wallpaper_id;
+                items.iter().position(|i| &i.id == id)
             })
-            .and_then(|id| items.iter().position(|i| i.id == id))
             .unwrap_or(0);
         let count = items.len();
         Self {
@@ -64,7 +101,8 @@ impl Gallery {
             busy: false,
             pool: preview::Pool::new(),
             thumbnails: HashMap::new(),
-            pending: HashSet::new(),
+            thumbnail_tasks: HashMap::new(),
+            requested: HashSet::new(),
             lru: VecDeque::new(),
             large: None,
             generation: 0,
@@ -78,122 +116,132 @@ impl Gallery {
             visible: Vec::new(),
             safe_only: true,
             safety_task: None,
+            recheck_tasks: HashMap::new(),
             verification: Verification::Checking {
                 completed: 0,
                 total: count,
             },
-            window: window.window_handle(),
+            #[cfg(test)]
+            renders: 0,
         }
     }
-    fn update_in_window(
-        view: &WeakEntity<Self>,
-        window: AnyWindowHandle,
-        cx: &mut AsyncApp,
-        update: impl FnOnce(&mut Self, &mut Context<Self>),
-    ) -> anyhow::Result<()> {
-        window.update(cx, |_, window, cx| {
-            let result = view.update(cx, |this, cx| {
-                update(this, cx);
-                cx.notify();
-            });
-            window.refresh();
-            result
-        })?
-    }
     fn rebuild_visible(&mut self, cx: &mut Context<Self>) {
+        let was_shown = self.visible.contains(&self.selected);
         self.visible = (0..self.items.len())
             .filter(|i| !self.safe_only || self.safety[*i].allowed)
             .collect();
-        if !self.visible.contains(&self.selected) {
+        let shown = self.visible.contains(&self.selected);
+        if !shown {
             self.large_task.take();
             if let Some(image) = self.large.take() {
                 cx.drop_image(image, None);
             }
-            if let Some(index) = self.visible.first().copied() {
+            // While verification runs, the requested selection (saved
+            // assignment or --select) may still become visible; only fall
+            // back to the first item once every result is in.
+            if !matches!(self.verification, Verification::Checking { .. })
+                && let Some(index) = self.visible.first().copied()
+            {
                 self.select(index, cx);
             }
-        }
-        if self.large.is_none()
-            && self.large_task.is_none()
-            && self.visible.contains(&self.selected)
-        {
+        } else if !was_shown {
+            // The requested selection just appeared: load its preview and
+            // bring it into view once.
             self.select(self.selected, cx);
         }
-        self.scroll_selection = true;
         cx.notify();
     }
     fn refresh_safety(&mut self, cx: &mut Context<Self>) {
-        self.safety_task.take();
+        self.recheck_tasks.clear();
         self.verification = Verification::Checking {
             completed: 0,
             total: self.items.len(),
         };
         self.safety = vec![safety::Status::unreviewed("Checking reviews…"); self.items.len()];
         self.rebuild_visible(cx);
-        let items = self.items.clone();
-        let (sender, mut receiver) = futures::channel::mpsc::unbounded();
-        enum Update {
-            Item(usize, safety::Status),
-            Complete,
-            Failed(String),
-        }
-        let worker = cx.background_executor().spawn(async move {
-            let reviews = match safety::read_whitelist(&safety::whitelist_path()) {
-                Ok(reviews) => reviews,
-                Err(error) => {
-                    let _ = sender.unbounded_send(Update::Failed(format!(
-                        "Could not load whitelist {}: {error:#}",
-                        safety::whitelist_path().display()
-                    )));
-                    return;
-                }
-            };
-            for (index, item) in items.iter().enumerate() {
-                if sender.is_closed() {
-                    return;
-                }
-                let status = safety::assess(&reviews, &item.id, &item.directory);
-                if sender.unbounded_send(Update::Item(index, status)).is_err() {
-                    return;
-                }
-            }
-            let _ = sender.unbounded_send(Update::Complete);
-        });
-        let window = self.window;
+        let items = self
+            .items
+            .iter()
+            .map(|i| (i.id.clone(), i.directory.clone()))
+            .collect();
+        let (sender, receiver) = futures::channel::mpsc::unbounded();
+        let worker = cx
+            .background_executor()
+            .spawn(async move { verify_all(items, sender) });
+        self.listen(receiver, Some(worker), cx);
+    }
+    /// Apply verification results on the foreground executor. The task is
+    /// owned by this entity; each batch updates it through its weak handle
+    /// and notifies it, which invalidates the window rendering it.
+    fn listen(
+        &mut self,
+        updates: impl futures::Stream<Item = Update> + Unpin + 'static,
+        worker: Option<Task<()>>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut batches = updates.ready_chunks(256);
         self.safety_task = Some(cx.spawn(async move |this, cx| {
-            use futures::StreamExt;
             let _worker = worker;
-            while let Some(update) = receiver.next().await {
-                if Self::update_in_window(&this, window, cx, |this, cx| {
-                    match update {
-                        Update::Item(index, status) => {
-                            this.safety[index] = status;
-                            if let Verification::Checking { completed, .. } = &mut this.verification
-                            {
-                                *completed += 1;
-                            }
-                        }
-                        Update::Complete => {
-                            this.verification = Verification::Ready;
-                            eprintln!(
-                                "Whitelist verification complete: {} of {} wallpapers safe",
-                                this.safety.iter().filter(|s| s.allowed).count(),
-                                this.items.len()
-                            );
-                        }
-                        Update::Failed(error) => {
-                            eprintln!("{error}");
-                            this.verification = Verification::Failed(error);
-                        }
+            while let Some(batch) = batches.next().await {
+                let applied = this.update(cx, |this, cx| {
+                    for update in batch {
+                        this.apply_update(update);
                     }
                     this.rebuild_visible(cx);
-                })
-                .is_err()
-                {
+                });
+                if applied.is_err() {
                     break;
                 }
             }
         }));
+    }
+    fn apply_update(&mut self, update: Update) {
+        match update {
+            Update::Item(index, status) => {
+                self.safety[index] = status;
+                if let Verification::Checking { completed, .. } = &mut self.verification {
+                    *completed += 1;
+                }
+            }
+            Update::Complete => {
+                self.verification = Verification::Ready;
+                // Earlier results inserted tiles above the selection.
+                self.scroll_selection = true;
+                eprintln!(
+                    "Whitelist verification complete: {} of {} wallpapers safe",
+                    self.safety.iter().filter(|s| s.allowed).count(),
+                    self.items.len()
+                );
+            }
+            Update::Failed(error) => {
+                eprintln!("{error}");
+                self.verification = Verification::Failed(error);
+            }
+        }
+    }
+    /// Re-read the whitelist and re-hash one item, e.g. after Apply refused it.
+    fn recheck(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(item) = self.items.get(index) else {
+            return;
+        };
+        let (id, directory) = (item.id.clone(), item.directory.clone());
+        let job = cx.background_executor().spawn(async move {
+            match safety::read_whitelist(&safety::whitelist_path()) {
+                Ok(reviews) => {
+                    safety::assess_installed(&reviews, &id, &directory, &library::libraries())
+                }
+                Err(e) => safety::Status::unreviewed(format!("Could not load whitelist: {e:#}")),
+            }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let status = job.await;
+            _ = this.update(cx, |this, cx| {
+                this.recheck_tasks.remove(&index);
+                this.safety[index] = status;
+                this.rebuild_visible(cx);
+            });
+        });
+        self.recheck_tasks.insert(index, task);
     }
     fn move_selection(&mut self, next: bool, cx: &mut Context<Self>) {
         if self.visible.is_empty() {
@@ -223,10 +271,9 @@ impl Gallery {
         if let Some(path) = self.items.get(index).and_then(|i| i.preview.clone())
             && let Some(receiver) = self.pool.request(path, true)
         {
-            let window = self.window;
             self.large_task = Some(cx.spawn(async move |this, cx| {
                 if let Ok(result) = receiver.await {
-                    _ = Self::update_in_window(&this, window, cx, |this, cx| {
+                    _ = this.update(cx, |this, cx| {
                         if this.generation == generation {
                             match result {
                                 Ok(image) => this.large = Some(image),
@@ -241,21 +288,20 @@ impl Gallery {
         cx.notify();
     }
     fn thumb(&mut self, index: usize, cx: &mut Context<Self>) -> Option<Arc<RenderImage>> {
+        self.requested.insert(index);
         if let Some(value) = self.thumbnails.get(&index) {
             self.lru.retain(|i| *i != index);
             self.lru.push_back(index);
             return value.clone();
         }
-        if !self.pending.contains(&index)
+        if !self.thumbnail_tasks.contains_key(&index)
             && let Some(path) = self.items[index].preview.clone()
             && let Some(receiver) = self.pool.request(path, false)
         {
-            self.pending.insert(index);
-            let window = self.window;
-            cx.spawn(async move |this, cx| {
+            let task = cx.spawn(async move |this, cx| {
                 if let Ok(result) = receiver.await {
-                    _ = Self::update_in_window(&this, window, cx, |this, cx| {
-                        this.pending.remove(&index);
+                    _ = this.update(cx, |this, cx| {
+                        this.thumbnail_tasks.remove(&index);
                         this.thumbnails.insert(index, result.ok());
                         this.lru.push_back(index);
                         while this.lru.len() > this.cache_limit {
@@ -268,10 +314,18 @@ impl Gallery {
                         cx.notify();
                     });
                 }
-            })
-            .detach();
+            });
+            self.thumbnail_tasks.insert(index, task);
         }
         None
+    }
+    /// Cancel decodes for tiles the last frame no longer displayed.
+    fn cancel_offscreen_thumbnails(&mut self) {
+        let requested = std::mem::take(&mut self.requested);
+        if !requested.is_empty() {
+            self.thumbnail_tasks
+                .retain(|index, _| requested.contains(index));
+        }
     }
     fn apply(&mut self, cx: &mut Context<Self>) {
         if self.busy {
@@ -290,23 +344,24 @@ impl Gallery {
             cx.notify();
             return;
         }
-        let (output, id) = (output.name.clone(), item.id.clone());
+        let (output, id, index) = (output.name.clone(), item.id.clone(), self.selected);
         self.busy = true;
         self.status = "Applying wallpaper…".into();
         cx.notify();
+        // Platform::apply re-verifies the whitelist and hash itself; the
+        // gallery's status is only a hint and never authorizes Apply.
         let job = cx.background_executor().spawn(async move {
             backend::Platform
                 .apply(&output, &id)
                 .map(|_| output)
-                .map_err(|e| e.to_string())
+                .map_err(|e| format!("{e:#}"))
         });
-        let window = self.window;
         cx.spawn(async move |this, cx| {
             let result = job.await;
-            _ = Self::update_in_window(&this, window, cx, |this, cx| {
+            _ = this.update(cx, |this, cx| {
                 this.busy = false;
                 if result.is_err() {
-                    this.refresh_safety(cx);
+                    this.recheck(index, cx);
                 }
                 this.status = match result {
                     Ok(o) => format!("Applied to {o}"),
@@ -332,6 +387,11 @@ fn button(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<D
 }
 impl Render for Gallery {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.renders += 1;
+        }
+        self.cancel_offscreen_thumbnails();
         let viewport = window.viewport_size();
         let grid = grid::GridLayout::new(viewport.width.into(), viewport.height.into());
         let columns = grid.columns;
@@ -535,6 +595,7 @@ impl Render for Gallery {
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.safe_only = !this.safe_only;
+                            this.scroll_selection = true;
                             this.rebuild_visible(cx);
                         })),
                     )
@@ -691,7 +752,31 @@ impl Render for Gallery {
             )
     }
 }
+// GPUI and its renderer report swapchain/present problems through `log`.
+// WPE_GALLERY_LOG=info|warn|debug prints them to stderr (default: warn).
+struct StderrLogger;
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::max_level()
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!("[{} {}] {}", record.level(), record.target(), record.args());
+        }
+    }
+    fn flush(&self) {}
+}
+fn init_logging() {
+    let level = std::env::var("WPE_GALLERY_LOG")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(log::LevelFilter::Warn);
+    if log::set_logger(&StderrLogger).is_ok() {
+        log::set_max_level(level);
+    }
+}
 fn main() -> anyhow::Result<()> {
+    init_logging();
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).is_some_and(|a| a == "--content-hash") {
         let path = args
@@ -759,16 +844,7 @@ fn main() -> anyhow::Result<()> {
             },
             |window, cx| {
                 cx.new(|cx| {
-                    let mut gallery = Gallery::new(items, outputs, window, cx);
-                    if let Some(index) = initial {
-                        gallery.selected = index;
-                    }
-                    cx.observe_window_bounds(window, |this, window, cx| {
-                        this.scroll_selection = true;
-                        cx.notify();
-                        window.refresh();
-                    })
-                    .detach();
+                    let mut gallery = Gallery::new(items, outputs, initial, cx);
                     gallery.focus.focus(window);
                     gallery.refresh_safety(cx);
                     gallery
@@ -779,4 +855,97 @@ fn main() -> anyhow::Result<()> {
         cx.activate(true);
     });
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: GPUI's glob export includes a `test` macro that would
+    // shadow the built-in attribute `#[gpui::test]` expands to.
+    use super::{Gallery, PathBuf, Update, Verification, library, safety};
+    use gpui::TestAppContext;
+    use std::{cell::Cell, rc::Rc};
+    fn wallpaper(id: &str) -> library::Wallpaper {
+        library::Wallpaper {
+            id: id.into(),
+            directory: PathBuf::from("/fixture").join(id),
+            title: format!("Fixture {id}"),
+            kind: "scene".into(),
+            tags: Vec::new(),
+            description: String::new(),
+            properties: serde_json::Value::Null,
+            preview: None,
+        }
+    }
+    fn safe() -> safety::Status {
+        safety::Status {
+            label: "Safe",
+            allowed: true,
+            reason: "synthetic".into(),
+        }
+    }
+    // Results produced on another thread while the window is idle must reach
+    // the root view as a notify that invalidates the window and re-renders it.
+    #[gpui::test]
+    fn background_verification_rerenders_root_view(cx: &mut TestAppContext) {
+        let items = vec![wallpaper("1"), wallpaper("2"), wallpaper("3")];
+        let window = cx.add_window(|_, cx| Gallery::new(items, Vec::new(), Some(0), cx));
+        let gallery = window.root(cx).unwrap();
+        let notifications = Rc::new(Cell::new(0));
+        cx.update(|cx| {
+            let notifications = notifications.clone();
+            cx.observe(&gallery, move |_, _| {
+                notifications.set(notifications.get() + 1)
+            })
+            .detach()
+        });
+        let (sender, receiver) = futures::channel::mpsc::unbounded();
+        window
+            .update(cx, |gallery, _, cx| gallery.listen(receiver, None, cx))
+            .unwrap();
+        // The selection appears first; later results must still repaint even
+        // though they no longer change the selection.
+        sender.unbounded_send(Update::Item(0, safe())).unwrap();
+        cx.run_until_parked();
+        let before = notifications.get();
+        let renders = gallery.read_with(cx, |gallery, _| gallery.renders);
+        std::thread::spawn(move || {
+            sender
+                .unbounded_send(Update::Item(1, safety::Status::unreviewed("no review")))
+                .unwrap();
+            sender.unbounded_send(Update::Item(2, safe())).unwrap();
+            sender.unbounded_send(Update::Complete).unwrap();
+        })
+        .join()
+        .unwrap();
+        cx.run_until_parked();
+        assert!(
+            notifications.get() > before,
+            "completion did not notify the root view"
+        );
+        gallery.read_with(cx, |gallery, _| {
+            // The test platform draws dirty windows when effects flush.
+            assert!(gallery.renders > renders, "window was not invalidated");
+            assert_eq!(gallery.verification, Verification::Ready);
+            assert_eq!(gallery.visible, vec![0, 2]);
+            assert_eq!(gallery.selected, 0);
+        });
+    }
+    #[gpui::test]
+    fn missing_selection_falls_back_only_after_verification(cx: &mut TestAppContext) {
+        let items = vec![wallpaper("1"), wallpaper("2")];
+        let window = cx.add_window(|_, cx| Gallery::new(items, Vec::new(), Some(1), cx));
+        let gallery = window.root(cx).unwrap();
+        let (sender, receiver) = futures::channel::mpsc::unbounded();
+        window
+            .update(cx, |gallery, _, cx| gallery.listen(receiver, None, cx))
+            .unwrap();
+        sender.unbounded_send(Update::Item(0, safe())).unwrap();
+        cx.run_until_parked();
+        gallery.read_with(cx, |gallery, _| assert_eq!(gallery.selected, 1));
+        sender
+            .unbounded_send(Update::Item(1, safety::Status::unreviewed("changed")))
+            .unwrap();
+        sender.unbounded_send(Update::Complete).unwrap();
+        cx.run_until_parked();
+        gallery.read_with(cx, |gallery, _| assert_eq!(gallery.selected, 0));
+    }
 }

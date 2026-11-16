@@ -1,0 +1,15 @@
+{
+    "file_format_version": "1.0.0",
+    "layer": {
+        "name": "VK_LAYER_WPE_TEST_out_of_date",
+        "type": "GLOBAL",
+        "library_path": "./libVkLayer_wpe_test_out_of_date.so",
+        "api_version": "1.3.0",
+        "implementation_version": "1",
+        "description": "wpe-gallery test: emulate a persistently out-of-date first swapchain",
+        "functions": {
+            "vkGetInstanceProcAddr": "wpe_test_GetInstanceProcAddr",
+            "vkGetDeviceProcAddr": "wpe_test_GetDeviceProcAddr"
+        }
+    }
+}

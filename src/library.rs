@@ -106,6 +106,7 @@ pub fn scan() -> (Vec<Wallpaper>, Vec<String>) {
     });
     (items, warnings)
 }
+const MAX_PROJECT_BYTES: u64 = 4 * 1024 * 1024;
 fn read(path: &Path) -> Result<Wallpaper> {
     let id = path
         .file_name()
@@ -116,19 +117,33 @@ fn read(path: &Path) -> Result<Wallpaper> {
         !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
         "invalid workshop ID"
     );
-    let v: serde_json::Value = serde_json::from_slice(&fs::read(path.join("project.json"))?)?;
-    let preview = v["preview"]
-        .as_str()
-        .and_then(|p| {
-            let p = path.join(p).canonicalize().ok()?;
-            p.starts_with(path.canonicalize().ok()?).then_some(p)
-        })
-        .or_else(|| {
-            ["preview.gif", "preview.jpg", "preview.png"]
-                .iter()
-                .map(|p| path.join(p))
-                .find(|p| p.is_file())
-        });
+    let file = fs::File::open(path.join("project.json"))?;
+    anyhow::ensure!(
+        file.metadata()?.is_file(),
+        "project.json must be a regular file"
+    );
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, MAX_PROJECT_BYTES + 1),
+        &mut bytes,
+    )?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_PROJECT_BYTES,
+        "project.json exceeds 4 MiB"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&bytes)?;
+    // Previews are only read from regular files inside the item directory,
+    // whether named by project.json or found by the conventional names.
+    let root = path.canonicalize()?;
+    let contained = |name: &str| {
+        let p = path.join(name).canonicalize().ok()?;
+        (p.starts_with(&root) && p.is_file()).then_some(p)
+    };
+    let preview = v["preview"].as_str().and_then(contained).or_else(|| {
+        ["preview.gif", "preview.jpg", "preview.png"]
+            .into_iter()
+            .find_map(contained)
+    });
     Ok(Wallpaper {
         title: v["title"].as_str().unwrap_or(&id).into(),
         directory: path.to_path_buf(),
@@ -225,6 +240,26 @@ mod tests {
           "0" { "path" "/games/Steam Library" } "1" { "path" "D:\\Steam" } }"#
             ),
             vec!["/games/Steam Library", "D:\\Steam"]
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn previews_stay_inside_the_item_directory() {
+        let d = tempfile::tempdir().unwrap();
+        let item = d.path().join("123");
+        fs::create_dir(&item).unwrap();
+        fs::write(d.path().join("outside.png"), b"x").unwrap();
+        std::os::unix::fs::symlink(d.path().join("outside.png"), item.join("preview.png")).unwrap();
+        fs::write(
+            item.join("project.json"),
+            br#"{"preview":"../outside.png"}"#,
+        )
+        .unwrap();
+        assert_eq!(read(&item).unwrap().preview, None);
+        fs::write(item.join("preview.jpg"), b"x").unwrap();
+        assert_eq!(
+            read(&item).unwrap().preview,
+            Some(item.join("preview.jpg").canonicalize().unwrap())
         );
     }
     #[test]

@@ -47,6 +47,7 @@ Diagnostics:
 ```sh
 wpe-gallery --scan                    # JSON library, metadata, warnings, outputs
 wpe-gallery --select 1234567890       # initially select an installed Workshop ID
+WPE_GALLERY_LOG=info wpe-gallery      # GPUI/renderer log (default: warn) on stderr
 ```
 
 Linux is the tested platform. Platform-independent library and UI code use GPUI's
@@ -136,9 +137,22 @@ cargo clippy --locked --all-targets -- -D warnings
 python3 tests/hash_compatibility.py
 ```
 
+### Vendored patches
+
 The vendored xattr 0.2.3 is a transitive GPUI dependency patched solely to use
 Linux ENODATA instead of libc's removed ENOATTR alias. Its upstream MIT/Apache
 licenses are retained. Cargo.lock pins the dependency graph.
+
+The vendored blade-graphics 0.7.1 (MIT, kvark/blade; GPUI 0.2.2's Linux
+renderer) is patched in `src/vulkan/surface.rs` and `src/vulkan/mod.rs`. When
+`vkAcquireNextImageKHR` returns `VK_ERROR_OUT_OF_DATE_KHR`, upstream returned an
+unpresentable frame and never rebuilt the swapchain, so every later frame was
+silently dropped until the window changed size. NVIDIA's Wayland driver does this
+right after the first frame on niri (niri-wm/niri#2335, zed-industries/zed#50734):
+the window kept showing `Verifying…` while layout and hit-testing had moved on.
+The patched surface rebuilds its swapchain with its last configuration and
+acquires again. The crate-level lint allow only silences upstream warnings that
+Cargo no longer caps for a path dependency.
 
 Feature comparison references:
 [Windows browser and playlist changes](https://store.steampowered.com/news/posts/?appgroupname=Wallpaper+Engine&appids=431960&enddate=1623502818&feed=steam_community_announcements),
@@ -257,10 +271,15 @@ WAYLAND_DISPLAY, DISPLAY and NIRI_SOCKET, then start nested niri inside that swa
 Use a fractional-scale output and a normal initial column, for example
 `output "winit" { scale 1.25; }` and
 `layout { default-column-width { fixed 1331; }; }`.
-Pass the nested compositor's environment JSON. The test verifies the app's
+Pass the nested compositor's environment JSON. The test builds
+`tests/vulkan/out_of_date_layer.c` (needs `cc`) and loads it as an explicit
+Vulkan layer for the app only; it makes the first configured swapchain report
+out-of-date after two frames, reproducing the NVIDIA/niri failure on any GPU.
+If zenity is installed it takes focus so the gallery is idle and unfocused
+when verification completes. The test verifies the app's
 runtime and sockets before screenshots, waits for an asynchronous hash check to
-finish without resizing, asserts painted thumbnails, then exercises column
-resize and fullscreen/return. It also captures a malformed-whitelist diagnostic.
+finish without resizing, asserts painted thumbnails and logged swapchain
+recovery, then exercises column resize and fullscreen/return. It also captures a malformed-whitelist diagnostic.
 Stop both test compositors afterwards. No test should use the live runtime.
 
 During verification the gallery shows `Verifying N wallpapers…` with progress.

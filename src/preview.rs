@@ -63,13 +63,13 @@ fn decode(path: &PathBuf, animate: bool, reply: &Reply) -> anyhow::Result<Arc<gp
     );
     let mut frames = smallvec::SmallVec::<[Frame; 1]>::new();
     let max = if animate { 48 } else { 1 };
-    if path
-        .extension()
-        .is_some_and(|x| x.eq_ignore_ascii_case("gif"))
-    {
-        let mut decoder = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(
-            std::fs::File::open(path)?,
-        ))?;
+    use std::io::{Read, Seek};
+    let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut magic = [0u8; 4];
+    let is_gif = file.read_exact(&mut magic).is_ok() && &magic == b"GIF8";
+    file.rewind()?;
+    if is_gif {
+        let mut decoder = image::codecs::gif::GifDecoder::new(file)?;
         anyhow::ensure!(
             u64::from(decoder.dimensions().0) * u64::from(decoder.dimensions().1) <= 16_000_000,
             "Preview dimensions exceed limit"
@@ -83,7 +83,8 @@ fn decode(path: &PathBuf, animate: bool, reply: &Reply) -> anyhow::Result<Arc<gp
             frames.push(convert(frame.into_buffer(), delay, animate));
         }
     } else {
-        let mut reader = image::ImageReader::open(path)?;
+        // Workshop previews are often mislabelled; trust content, not extension.
+        let mut reader = image::ImageReader::new(file).with_guessed_format()?;
         reader.limits(image::Limits::default());
         frames.push(convert(
             reader.decode()?.into_rgba8(),

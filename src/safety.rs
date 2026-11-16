@@ -98,21 +98,46 @@ pub fn assess(reviews: &Whitelist, id: &str, directory: &Path) -> Status {
         Err(e) => Status::unreviewed(format!("Cannot verify content: {e:#}")),
     }
 }
-pub fn resolve(id: &str) -> Result<PathBuf> {
+/// Every installed copy of `id` across the given Steam library roots.
+fn installed_copies(id: &str, roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .map(|root| root.join("steamapps/workshop/content/431960").join(id))
+        .filter(|path| path.symlink_metadata().is_ok())
+        .collect()
+}
+/// The single installed copy of `id`. Several copies are ambiguous (the
+/// renderer could be pointed at an unreviewed one), so they fail closed.
+pub fn resolve_in(id: &str, roots: &[PathBuf]) -> Result<PathBuf> {
     ensure!(valid_id(id), "invalid Workshop ID");
-    let mut paths = Vec::new();
-    for root in crate::library::libraries() {
-        let path = root.join("steamapps/workshop/content/431960").join(id);
-        if path.exists() {
-            paths.push(path);
-        }
-    }
+    let mut paths = installed_copies(id, roots);
     ensure!(
         paths.len() == 1,
         "Workshop {id}: expected one installed copy, found {}",
         paths.len()
     );
     Ok(paths.remove(0))
+}
+pub fn resolve(id: &str) -> Result<PathBuf> {
+    resolve_in(id, &crate::library::libraries())
+}
+/// The status Apply and the launcher will reach for an item the gallery
+/// scanned at `directory`: the review must match and `directory` must be the
+/// only installed copy, exactly as `verify` requires.
+pub fn assess_installed(
+    reviews: &Whitelist,
+    id: &str,
+    directory: &Path,
+    roots: &[PathBuf],
+) -> Status {
+    match resolve_in(id, roots) {
+        Ok(path) if path == directory => assess(reviews, id, directory),
+        Ok(path) => Status::unreviewed(format!(
+            "Installed copy moved to {}; reopen the gallery.",
+            path.display()
+        )),
+        Err(e) => Status::unreviewed(format!("{e:#}")),
+    }
 }
 pub fn verify(id: &str) -> Result<PathBuf> {
     let reviews = read_whitelist(&whitelist_path())?;
@@ -271,6 +296,24 @@ mod tests {
         assert_ne!(hash, content_hash(d.path()).unwrap());
         reviews.get_mut("123").unwrap().verdict = Verdict::Blocked;
         assert_eq!(assess(&reviews, "123", d.path()).label, "Blocked");
+    }
+    #[test]
+    fn duplicate_installs_fail_closed_in_gallery_and_launcher() {
+        let d = tempfile::tempdir().unwrap();
+        let roots = vec![d.path().join("a"), d.path().join("b")];
+        let item = |root: &Path| root.join("steamapps/workshop/content/431960/123");
+        fs::create_dir_all(item(&roots[0])).unwrap();
+        fs::write(item(&roots[0]).join("a"), b"one").unwrap();
+        let reviews = BTreeMap::from([(
+            "123".into(),
+            review(content_hash(&item(&roots[0])).unwrap(), Verdict::Safe),
+        )]);
+        assert!(assess_installed(&reviews, "123", &item(&roots[0]), &roots).allowed);
+        fs::create_dir_all(item(&roots[1])).unwrap();
+        let status = assess_installed(&reviews, "123", &item(&roots[0]), &roots);
+        assert!(!status.allowed);
+        assert!(status.reason.contains("found 2"), "{}", status.reason);
+        assert!(resolve_in("123", &roots).is_err());
     }
     #[cfg(unix)]
     #[test]

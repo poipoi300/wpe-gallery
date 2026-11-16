@@ -70,3 +70,24 @@ a repaint, while list height comes from its flex viewport even when initially
 empty. Geometry uses the configured content viewport and observes configure
 changes. Non-GUI tests cover first-configure geometry and distinct checking,
 failed and completed empty states.
+
+
+## v0.2.3 NVIDIA/niri repaint
+
+Root cause of "Verifying… 0 of 464" until resize: GPUI 0.2.2 renders through
+blade-graphics 0.7.1, whose `acquire_frame` turned `VK_ERROR_OUT_OF_DATE_KHR`
+into a frame that is never presented and never rebuilt the swapchain. NVIDIA's
+Wayland driver reports out-of-date after the first frame on niri. Every later
+draw (verification progress, tiles, hit-test regions) ran but was dropped until a
+size change reconfigured the swapchain. Earlier headless runs used RADV on the
+integrated GPU (Mesa's device selection), not NVIDIA, which is why they passed.
+
+Validation used private headless sway (5120×1440, scale 1.25) with nested niri
+using the user's layout/window rules, NVIDIA Vulkan forced (`ZED_DEVICE_ID`), the
+real 464-item library with evicted page cache and the real whitelist read-only,
+and the gallery unfocused while verification finished. With the test layer, the
+installed 0.2.2 reproduced the report exactly (0 of 464, Verifying, no tiles);
+0.2.3 recovered the swapchain and painted 438 verified tiles without resize.
+`tests/gui_startup.py` fails on 0.2.2 and passes on 0.2.3; `tests/gui_pointer.py`
+passes. Idle after verification: 0.0–0.1% of one core; GPUI still answers
+compositor frame callbacks (about one wakeup per refresh) while mapped.
