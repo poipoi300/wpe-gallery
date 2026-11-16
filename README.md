@@ -38,7 +38,8 @@ cargo build --release --locked
 A Vulkan-capable graphics driver is required by GPUI on Linux. Install
 linux-wallpaperengine separately; a package providing that name is sufficient.
 
-Left/Right select the previous/next wallpaper and bring its tile into view.
+Left/Right select the previous/next wallpaper, Up/Down the one in the row
+above/below; the selected tile is kept in view.
 Tab cycles the target output, Enter applies, Ctrl+Q quits. Click a display,
 tile, or Apply button for the same actions.
 

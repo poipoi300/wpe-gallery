@@ -91,3 +91,33 @@ installed 0.2.2 reproduced the report exactly (0 of 464, Verifying, no tiles);
 `tests/gui_startup.py` fails on 0.2.2 and passes on 0.2.3; `tests/gui_pointer.py`
 passes. Idle after verification: 0.0–0.1% of one core; GPUI still answers
 compositor frame callbacks (about one wakeup per refresh) while mapped.
+
+
+## Scroll performance, thin banners and details footer
+
+Headless sway (gles2) at 5120×1440@240 Hz, scale 1.25, fullscreen, with the real
+464-item library (scratch copies of whitelist and hash cache) and a virtual
+pointer scrolling 10 px per event at 240 events/s, reversing every 2.5 s. A
+local, uncommitted instrumentation patch logged per-second render intervals and
+main-thread CPU (`/proc/thread-self/schedstat`); eu-stack sampled the main
+thread, and a watchdog captured stacks inside frames longer than 30 ms.
+
+Before: every new-row phase dropped to 65–80 renders/s with single frames of
+130–240 ms and 10–13 ms main-thread CPU per frame. All captured long frames were
+shaping tile titles: GPUI keeps a shaped line only while consecutive frames use
+it, and cosmic-text compiles a new shaping plan per run (worse with CJK
+fallback). After: titles are shaped once (prewarmed in 2 ms idle slices) and
+painted from a cache; over two 10 s runs the longest frame interval was 8.9 ms,
+main-thread CPU 1.2–2.0 ms per frame, 134–143 renders/s. In this environment
+about 80% of each frame is spent waiting in present for the GPU/compositor; the
+same wait capped the old build at 150/s between hitches.
+
+With an animated GIF selected and no input, the old build re-rendered at 141/s
+(27% of a core) because GPUI requests a frame every refresh for multi-frame
+images; frames now advance on a timer, 12 renders/s and 3% for an 80 ms GIF.
+A painted path (first try at the disclosure chevron) routed every frame through
+a window-sized multisampled texture and halved the rate; it is an SVG instead.
+
+tests/gui_pointer.py passes with the Apply button pinned to the details footer.
+Screenshots covered the grid, collapsed and expanded review details, the bottom
+fade with a hovered title scrolling, and Blocked/Unreviewed tile chips.

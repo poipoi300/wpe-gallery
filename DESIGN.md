@@ -100,15 +100,19 @@ All text uses the platform-resolved sans-serif family. The app title and selecte
 wallpaper title are semibold; gallery labels and metadata use regular body text.
 The frontmatter records the three sizes actually used in the GPUI implementation.
 
-Tile titles stay on one line and truncate with an ellipsis. The details title and
+Tile titles stay on one line and truncate with an ellipsis; while the pointer is
+over a tile whose title does not fit, that title alone scrolls to reveal the rest
+and back, pausing at each end. The details title and
 description wrap within the sidebar. Native font fallback determines coverage for
 Workshop titles in additional languages.
 
 ## Layout
 
-The display strip sits above the gallery and details pane, with status beneath.
-The sidebar stays at 340 logical pixels and scrolls independently. Gallery rows
-are virtualized, 164 logical pixels high, with 112 logical pixel artwork areas.
+The display strip sits above the gallery and details pane; both run to the
+bottom edge of the window. The sidebar stays at 340 logical pixels; its details
+scroll independently above a pinned footer holding status and Apply. Gallery rows
+are virtualized, 164 logical pixels high; a thin 24 logical pixel title banner
+leaves the rest of each tile to artwork.
 Columns adapt from one to twelve; equal computed widths keep long titles inside
 their tiles. Related items use the spacing scale recorded above.
 
@@ -119,8 +123,9 @@ tile artwork fills its available area by cropping. The window minimum is
 
 ## Elevation & Depth
 
-The interface uses tonal layers and borders. It has no authored shadows, blur, or
-decorative elevation. A two-pixel blue outline distinguishes the selected tile;
+The interface uses tonal layers and borders. Its one shadow is a 5 logical pixel
+fade at the bottom edge of the gallery, under which rows scroll out of view; there
+is no blur or decorative elevation. A two-pixel blue outline distinguishes the selected tile;
 the normal tile outline uses the control surface color.
 
 ## Shapes
@@ -135,8 +140,9 @@ small corner radius in the frontmatter. Artwork is clipped to its tile area.
 The shared button treatment uses compact vertical and wider horizontal padding.
 Apply uses the primary fill; other controls use the control fill. Pointer hover
 uses the shared hover fill. Disabled Apply is half opaque and has no click handler;
-its label changes to “Applying…” while work runs. Status and errors appear below
-the main area. Keyboard actions are handled at the gallery root.
+its label changes to “Applying…” while work runs. Status and errors appear just
+above Apply in the details footer. Keyboard actions are handled at the gallery
+root: Left/Right step through the list, Up/Down move a row in the same column.
 
 ### Display selection
 
@@ -152,7 +158,8 @@ compact padding. They are not interactive filters.
 
 Tiles join an artwork area and a truncated title. Hover changes the surface fill;
 selection changes the outline. Missing artwork has a text placeholder.
-Only the selected large GIF preview animates; gallery thumbnails remain static.
+Only the selected large GIF preview animates, at its own frame rate; gallery
+thumbnails remain static.
 
 ## Do's and Don'ts
 
@@ -167,7 +174,11 @@ Only the selected large GIF preview animates; gallery thumbnails remain static.
 - **Don't** present informational tags as working filters.
 
 Safety states extend the existing controls: a persistent Safe only toggle defaults
-on, Reload reviews revalidates local content, and tiles/details use explicit Safe,
-Unreviewed and Blocked labels. Disabled Apply retains its action label with reduced
-opacity, while details explain the refusal. Tile selection activates on primary
+on and Reload reviews revalidates local content. Safe tiles carry no label;
+Unreviewed and Blocked tiles (listed only with Safe only off) carry a small dark
+chip over the artwork's top-left corner. In the details, a safe item shows one
+line, “Marked safe by <reviewer>”, behind a drawn disclosure chevron that expands
+the review date, notes and content hash. Other states name the state, say Apply is
+unavailable and give the reason. Disabled Apply retains its action label with
+reduced opacity. Tile selection activates on primary
 mouse-down so virtualization and image redraws cannot discard its pending click.
