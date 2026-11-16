@@ -16,6 +16,7 @@ impl ApplyBackend for Platform {
             cfg!(target_os = "linux"),
             "Apply is currently supported on Linux only"
         );
+        crate::safety::verify(wallpaper)?;
         crate::library::save_assignment(&crate::library::config_path(), output, wallpaper)?;
         let result = std::process::Command::new("systemctl")
             .args(["--user", "restart", "linux-wallpaperengine.service"])

@@ -9,6 +9,7 @@ use std::{
 #[derive(Clone, Debug, Serialize)]
 pub struct Wallpaper {
     pub id: String,
+    pub directory: PathBuf,
     pub title: String,
     pub kind: String,
     pub tags: Vec<String>,
@@ -130,6 +131,7 @@ fn read(path: &Path) -> Result<Wallpaper> {
         });
     Ok(Wallpaper {
         title: v["title"].as_str().unwrap_or(&id).into(),
+        directory: path.to_path_buf(),
         id,
         kind: v["type"].as_str().unwrap_or("unknown").into(),
         tags: v["tags"]

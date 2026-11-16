@@ -34,3 +34,22 @@ The transitive proc-macro-error2 dependency emits a future compatibility warning
 Linux is the validated build; macOS/Windows builds and Apply backends remain future
 work. Headless tests use the real local library but contain no copyrighted preview
 artwork in the repository.
+
+## v0.2 follow-up
+
+Headless sway at 5120×1440 scale 1.25 with a real Wayland virtual pointer:
+image/title selection, a held press across redraws, pointer Apply, safe-only
+filtering and blocked/unreviewed/changed-item refusal passed using synthetic
+fixtures and a mocked systemctl. No live windows, audio or wallpaper-service
+restart were used in this follow-up. The exact old-version selection failure
+was not reproduced in isolated sway or nested niri; selection now happens on
+mouse-down rather than depending on a later mouse-up in the virtualized list.
+
+Six Rust unit tests and two CLI integration tests pass. They cover missing,
+malformed, safe, blocked and changed reviews; last-safe fallback revalidation;
+verified renderer paths; symlink rejection; and atomic replacement during hashing.
+A Python compatibility test agrees with the independent triage implementation
+for hidden/Unicode file names and empty directories. Three real reviewed hashes
+were also checked read-only against the user's private whitelist; no review
+entries or private data are included here. Independent security review cleared
+the hash-contract and file-replacement findings after their fixes.

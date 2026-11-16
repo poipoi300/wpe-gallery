@@ -165,3 +165,9 @@ Only the selected large GIF preview animates; gallery thumbnails remain static.
 - **Don't** animate every gallery tile.
 - **Don't** let long Workshop titles widen their gallery column.
 - **Don't** present informational tags as working filters.
+
+Safety states extend the existing controls: a persistent Safe only toggle defaults
+on, Reload reviews revalidates local content, and tiles/details use explicit Safe,
+Unreviewed and Blocked labels. Disabled Apply retains its action label with reduced
+opacity, while details explain the refusal. Tile selection activates on primary
+mouse-down so virtualization and image redraws cannot discard its pending click.

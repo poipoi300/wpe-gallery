@@ -1,6 +1,6 @@
-mod backend;
-mod library;
+use wpe_gallery::{backend, library, renderer, safety};
 mod preview;
+use anyhow::Context as _;
 use backend::ApplyBackend;
 use gpui::{prelude::*, *};
 use std::{
@@ -26,6 +26,10 @@ struct Gallery {
     scroll_selection: bool,
     last_columns: usize,
     focus: FocusHandle,
+    safety: Vec<safety::Status>,
+    visible: Vec<usize>,
+    safe_only: bool,
+    safety_task: Option<Task<()>>,
 }
 actions!(gallery, [Quit, Apply, Next, Previous, NextOutput]);
 impl Gallery {
@@ -44,6 +48,7 @@ impl Gallery {
             })
             .and_then(|id| items.iter().position(|i| i.id == id))
             .unwrap_or(0);
+        let count = items.len();
         Self {
             items,
             outputs,
@@ -63,7 +68,87 @@ impl Gallery {
             scroll_selection: true,
             last_columns: 0,
             focus: cx.focus_handle(),
+            safety: vec![safety::Status::unreviewed("Checking reviews…"); count],
+            visible: Vec::new(),
+            safe_only: true,
+            safety_task: None,
         }
+    }
+    fn rebuild_visible(&mut self, cx: &mut Context<Self>) {
+        self.visible = (0..self.items.len())
+            .filter(|i| !self.safe_only || self.safety[*i].allowed)
+            .collect();
+        if !self.visible.contains(&self.selected) {
+            self.large_task.take();
+            if let Some(image) = self.large.take() {
+                cx.drop_image(image, None);
+            }
+            if let Some(index) = self.visible.first().copied() {
+                self.select(index, cx);
+            }
+        }
+        if self.large.is_none()
+            && self.large_task.is_none()
+            && self.visible.contains(&self.selected)
+        {
+            self.select(self.selected, cx);
+        }
+        self.scroll_selection = true;
+        cx.notify();
+    }
+    fn refresh_safety(&mut self, cx: &mut Context<Self>) {
+        self.safety_task.take();
+        self.safety = vec![safety::Status::unreviewed("Checking reviews…"); self.items.len()];
+        self.rebuild_visible(cx);
+        let items = self.items.clone();
+        let (sender, mut receiver) = futures::channel::mpsc::unbounded();
+        let worker = cx.background_executor().spawn(async move {
+            let reviews = safety::read_whitelist(&safety::whitelist_path())
+                .map_err(|e| format!("Whitelist unavailable: {e:#}"));
+            for (index, item) in items.iter().enumerate() {
+                if sender.is_closed() {
+                    break;
+                }
+                let status = match &reviews {
+                    Ok(reviews) => safety::assess(reviews, &item.id, &item.directory),
+                    Err(reason) => safety::Status::unreviewed(reason.clone()),
+                };
+                if sender.unbounded_send((index, status)).is_err() {
+                    break;
+                }
+            }
+        });
+        self.safety_task = Some(cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            let _worker = worker;
+            while let Some((index, status)) = receiver.next().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.safety[index] = status;
+                        this.rebuild_visible(cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+    fn move_selection(&mut self, next: bool, cx: &mut Context<Self>) {
+        if self.visible.is_empty() {
+            return;
+        }
+        let position = self
+            .visible
+            .iter()
+            .position(|i| *i == self.selected)
+            .unwrap_or(0);
+        let position = if next {
+            (position + 1).min(self.visible.len() - 1)
+        } else {
+            position.saturating_sub(1)
+        };
+        self.select(self.visible[position], cx);
     }
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         self.large_task.take();
@@ -137,6 +222,11 @@ impl Gallery {
         let Some(item) = self.items.get(self.selected) else {
             return;
         };
+        if !self.safety[self.selected].allowed {
+            self.status = format!("Apply refused: {}", self.safety[self.selected].reason);
+            cx.notify();
+            return;
+        }
         let (output, id) = (output.name.clone(), item.id.clone());
         self.busy = true;
         self.status = "Applying wallpaper…".into();
@@ -151,6 +241,9 @@ impl Gallery {
             let result = job.await;
             _ = this.update(cx, |this, cx| {
                 this.busy = false;
+                if result.is_err() {
+                    this.refresh_safety(cx);
+                }
                 this.status = match result {
                     Ok(o) => format!("Applied to {o}"),
                     Err(e) => e,
@@ -185,11 +278,17 @@ impl Render for Gallery {
             self.last_columns = columns;
         }
         if self.scroll_selection {
-            self.scroll
-                .scroll_to_item(self.selected / columns, ScrollStrategy::Center);
+            self.scroll.scroll_to_item(
+                self.visible
+                    .iter()
+                    .position(|i| *i == self.selected)
+                    .unwrap_or(0)
+                    / columns,
+                ScrollStrategy::Center,
+            );
             self.scroll_selection = false;
         }
-        let rows = self.items.len().div_ceil(columns);
+        let rows = self.visible.len().div_ceil(columns);
         let tile_width =
             ((f32::from(window.bounds().size.width) - 372. - 12. * (columns - 1) as f32)
                 / columns as f32)
@@ -236,7 +335,12 @@ impl Render for Gallery {
             .flex()
             .flex_col()
             .gap_4();
-        if let Some(item) = self.items.get(self.selected).cloned() {
+        if let Some(item) = self
+            .items
+            .get(self.selected)
+            .filter(|_| self.visible.contains(&self.selected))
+            .cloned()
+        {
             let mut preview = div()
                 .w_full()
                 .h(px(210.))
@@ -260,6 +364,17 @@ impl Render for Gallery {
             }
             details = details
                 .child(preview)
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(self.safety[self.selected].label),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0xb6beca))
+                        .child(self.safety[self.selected].reason.clone()),
+                )
                 .child(
                     div()
                         .text_xl()
@@ -296,10 +411,16 @@ impl Render for Gallery {
                         },
                     )
                     .bg(rgb(0x2866ad))
-                    .when(!self.busy && !self.outputs.is_empty(), |s| {
-                        s.on_click(cx.listener(|this, _, _, cx| this.apply(cx)))
-                    })
-                    .when(self.busy || self.outputs.is_empty(), |s| s.opacity(0.5)),
+                    .when(
+                        !self.busy
+                            && !self.outputs.is_empty()
+                            && self.safety[self.selected].allowed,
+                        |s| s.on_click(cx.listener(|this, _, _, cx| this.apply(cx))),
+                    )
+                    .when(
+                        self.busy || self.outputs.is_empty() || !self.safety[self.selected].allowed,
+                        |s| s.opacity(0.5),
+                    ),
                 )
                 .child(div().text_sm().text_color(rgb(0xb6beca)).child(
                     if item.description.is_empty() {
@@ -320,28 +441,36 @@ impl Render for Gallery {
             .font_family("sans-serif").text_sm().text_color(rgb(0xedf0f4))
             .on_action(|_: &Quit,_,cx|cx.quit())
             .on_action(cx.listener(|this,_:&Apply,_,cx|this.apply(cx)))
-            .on_action(cx.listener(|this,_:&Next,_,cx|if !this.items.is_empty(){this.select((this.selected+1).min(this.items.len()-1),cx)}))
-            .on_action(cx.listener(|this,_:&Previous,_,cx|if !this.items.is_empty(){this.select(this.selected.saturating_sub(1),cx)}))
+            .on_action(cx.listener(|this,_:&Next,_,cx|this.move_selection(true,cx)))
+            .on_action(cx.listener(|this,_:&Previous,_,cx|this.move_selection(false,cx)))
             .on_action(cx.listener(|this,_:&NextOutput,_,cx|if !this.outputs.is_empty(){this.output=(this.output+1)%this.outputs.len();cx.notify();}))
             .child(top)
+            .child(div().flex().items_center().gap_3().px_4().py_2()
+                .child(button("safe-filter",if self.safe_only {"Safe only: on"} else {"Safe only: off"})
+                    .on_click(cx.listener(|this,_,_,cx| {this.safe_only = !this.safe_only;this.rebuild_visible(cx);})))
+                .child(button("refresh-reviews","Reload reviews").on_click(cx.listener(|this,_,_,cx|this.refresh_safety(cx))))
+                .child("Only reviewed, unchanged items can be applied."))
             .child(div().flex().flex_1().min_h_0()
                 .child(div().flex_1().min_w_0().h_full().flex().flex_col().p_4().gap_3()
-                    .child(div().flex().justify_between().child(format!("Installed wallpapers  ·  {}",self.items.len())).child(div().text_color(rgb(0xb6beca)).child("← → Select   ·   Tab Display   ·   Enter Apply")))
-                    .when(self.items.is_empty(),|s|s.child("No wallpapers found. Install Wallpaper Engine Workshop items through Steam, then reopen WPE Gallery."))
+                    .child(div().flex().justify_between().child(format!("Installed wallpapers  ·  {} of {}",self.visible.len(),self.items.len())).child(div().text_color(rgb(0xb6beca)).child("← → Select   ·   Tab Display   ·   Enter Apply")))
+                    .when(self.visible.is_empty(),|s|s.child(if self.items.is_empty() {"No wallpapers found. Download Workshop items through Steam, then reopen."} else {"No verified safe wallpapers. Add reviewed entries to whitelist.json and reload reviews, or turn Safe only off to inspect unreviewed items."}))
                     .child(uniform_list("wallpapers",rows,cx.processor(move |this,range: std::ops::Range<usize>,_,cx| {
                         range.map(|row| {
                             let mut line = div().flex().gap_3().h(px(164.)).pb_3();
-                            for index in row*columns..((row+1)*columns).min(this.items.len()) {
+                            for position in row*columns..((row+1)*columns).min(this.visible.len()) {
+                                let index=this.visible[position];
                                 let source = this.thumb(index,cx);
                                 let item = &this.items[index];
                                 let mut tile = div().id(("tile",index)).w(px(tile_width)).flex_shrink_0().min_w_0().h_full().flex().flex_col()
                                     .bg(rgb(0x22262d)).border_2().border_color(if index == this.selected {rgb(0x569dff)}else{rgb(0x303741)})
                                     .cursor_pointer().hover(|s|s.bg(rgb(0x303741)))
-                                    .on_click(cx.listener(move |this,_,_,cx|this.select(index,cx)));
-                                let mut artwork = div().w_full().h(px(112.)).bg(rgb(0x121519)).overflow_hidden().flex().items_center().justify_center();
+                                    .on_mouse_down(MouseButton::Left,cx.listener(move |this,_,_,cx| {
+                                        this.select(index,cx);cx.stop_propagation();
+                                    }));
+                                let mut artwork = div().w_full().h(px(92.)).bg(rgb(0x121519)).overflow_hidden().flex().items_center().justify_center();
                                 if let Some(source) = source { artwork = artwork.child(img(source).size_full().object_fit(ObjectFit::Cover)); }
                                 else { artwork = artwork.child("No preview"); }
-                                tile = tile.child(artwork).child(div().px_2().py_1().truncate().child(item.title.clone()));
+                                tile = tile.child(artwork).child(div().px_2().text_xs().text_color(rgb(0xb6beca)).child(this.safety[index].label)).child(div().px_2().py_1().truncate().child(item.title.clone()));
                                 line = line.child(tile);
                             }
                             line
@@ -352,9 +481,23 @@ impl Render for Gallery {
     }
 }
 fn main() -> anyhow::Result<()> {
+    let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|a| a == "--content-hash") {
+        let path = args
+            .get(2)
+            .context("usage: wpe-gallery --content-hash ITEM_DIRECTORY")?;
+        println!("{}", safety::content_hash(std::path::Path::new(path))?);
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|a| a == "--launch-renderer") {
+        return renderer::launch();
+    }
+    if args.get(1).is_some_and(|a| a == "--renderer-args") {
+        println!("{}", serde_json::to_string(&renderer::arguments(false)?)?);
+        return Ok(());
+    }
     let (items, warnings) = library::scan();
     let outputs = backend::outputs();
-    let args: Vec<_> = std::env::args().collect();
     if args.iter().any(|a| a == "--scan") {
         println!(
             "{}",
@@ -410,9 +553,7 @@ fn main() -> anyhow::Result<()> {
                         gallery.selected = index;
                     }
                     gallery.focus.focus(window);
-                    if !gallery.items.is_empty() {
-                        gallery.select(gallery.selected, cx);
-                    }
+                    gallery.refresh_safety(cx);
                     gallery
                 })
             },

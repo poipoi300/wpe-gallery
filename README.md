@@ -18,7 +18,7 @@ Wallpaper Engine (app 431960), its assets, and downloaded Workshop items.
 - Atomic configuration writes and asynchronous systemd user-service restart.
 
 The layout follows the familiar display strip, wallpaper grid and right-hand
-details pane. The gallery is deliberately local-only in v0.1: no Workshop
+details pane. The gallery is deliberately local-only in v0.2: no Workshop
 subscription management, search, filters, playlists, or property editor yet.
 See the [issue tracker](https://github.com/poipoi300/wpe-gallery/issues).
 
@@ -72,7 +72,7 @@ systemctl --user enable --now linux-wallpaperengine.service
 The sample unit is tied to `niri.service`; on other desktop environments adjust
 its PartOf/After/WantedBy to your graphical session. Export Wayland session
 variables to your systemd user manager using your desktop's session setup.
-The launcher requires Python 3 and the renderer at /usr/bin/linux-wallpaperengine.
+The launcher requires the dedicated /usr/bin/wpe-gallery-launch helper (built alongside the GUI) and the renderer at /usr/bin/linux-wallpaperengine. Install both release binaries before enabling the unit. Before upgrading from 0.1, a missing helper fails closed and does not open a GUI.
 
 Apply writes `$XDG_CONFIG_HOME/linux-wallpaperengine/assignments.json`
 (default `~/.config/linux-wallpaperengine/assignments.json`):
@@ -87,21 +87,20 @@ Apply writes `$XDG_CONFIG_HOME/linux-wallpaperengine/assignments.json`
 }
 ```
 
-Only the chosen output changes; existing assignments for other outputs survive.
+Only reviewed-safe, hash-matching items can be applied. Only the chosen output changes; existing assignments for other outputs survive.
 The file is written to a temporary file in the same directory, synced and renamed.
 Malformed or future-version configurations produce an error rather than being
 overwritten. Run one app instance when editing assignments.
 
-The launcher sorts output names and constructs one argument array:
+The launcher verifies every selected item and passes its absolute verified directory, avoiding a different Steam library being resolved by the renderer. It sorts output names and constructs one argument array:
 
 ```text
-linux-wallpaperengine --silent --fps WPE_FPS   --fullscreen-pause-only-active --scaling fill   --screen-root DP-1 --bg 1234567890 --scaling fill   --screen-root HDMI-A-1 --bg 2345678901 --scaling fill
+linux-wallpaperengine --silent --fps WPE_FPS   --fullscreen-pause-only-active --scaling fill   --screen-root DP-1 --bg /verified/SteamLibrary/steamapps/workshop/content/431960/1234567890 --scaling fill   --screen-root HDMI-A-1 --bg /verified/SteamLibrary/steamapps/workshop/content/431960/2345678901 --scaling fill
 ```
 
 It preserves WPE_FPS (30 by default) and the existing fullscreen pause rule.
 Before assignments.json exists, WPE_BG and WPE_OUTPUT from wallpaper.env retain
-their single-display behavior; unset WPE_OUTPUT falls back to the first enabled
-niri output. Remove assignments.json to return to that mode.
+their single-display behavior, subject to the same whitelist checks; unset WPE_OUTPUT uses the first active Wayland output (niri fallback). Remove assignments.json to return to that mode.
 Disconnected-output assignments are retained; edit the file to remove stale names
 and reopen the app after display changes. Hotplug handling is future work.
 
@@ -133,8 +132,8 @@ Long GIFs loop a truncated preview, not their entire original duration.
 ```sh
 cargo test --locked
 cargo fmt --check
-cargo clippy --locked -- -D warnings
-python3 tests/launcher.py
+cargo clippy --locked --all-targets -- -D warnings
+python3 tests/hash_compatibility.py
 ```
 
 The vendored xattr 0.2.3 is a transitive GPUI dependency patched solely to use
@@ -150,9 +149,94 @@ Renderer compatibility belongs in linux-wallpaperengine; gallery issues tagged
 
 MIT licensed; see [LICENSE](LICENSE).
 
+## Safety reviews and content verification
+
+The whitelist lives at `$XDG_CONFIG_HOME/wpe-gallery/whitelist.json`
+(default `~/.config/wpe-gallery/whitelist.json`). It is private user-maintained
+configuration. WPE Gallery ships no approved IDs and never approves an item itself.
+The format is one JSON object keyed by Workshop ID:
+
+```json
+{
+  "1234567890": {
+    "verdict": "safe",
+    "reviewed": "2026-11-16",
+    "reviewer": "Your reviewer name",
+    "notes": "What was inspected and any limitations",
+    "content_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "2345678901": {
+    "verdict": "blocked",
+    "reviewed": "2026-11-16",
+    "reviewer": "Your reviewer name",
+    "notes": "Reason this item must not run",
+    "content_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}
+```
+
+Zero hashes above are placeholders, not reviews. Use `blocked` and explain the
+reason in `notes` for blocklist entries. A safe entry must have a lowercase
+64-character SHA-256 content hash. Required fields are verdict, reviewed
+(YYYY-MM-DD), reviewer (nonempty), notes and content_hash. Missing/malformed
+whitelists authorize nothing.
+
+Safe-only filtering starts on. Tiles and details show Safe, Unreviewed or Blocked.
+A safe verdict becomes Safe only after its complete local tree matches its review.
+Changed content is Unreviewed and requires a new review. Toggle Safe only off to
+inspect other items; this does not permit applying them. Reload reviews after
+editing the file or after Steam updates. Verification runs off the UI thread;
+Apply always rereads the whitelist and rehashes, independently of cached badges.
+
+To compute a hash without approving or executing anything:
+
+```sh
+wpe-gallery --content-hash /path/to/steamapps/workshop/content/431960/1234567890
+wpe-gallery --renderer-args  # verify and print the proposed CLI; no renderer/unit starts
+```
+
+The final hash contract is `wpe-gallery-content-v1`: ASCII domain name plus NUL;
+all files and directories below the item root, sorted by UTF-8 relative POSIX
+path bytes; ASCII D/F tag, big-endian u64 path byte length, path bytes; files add
+big-endian u64 file byte length and raw bytes. Hidden files, previews, project.json,
+original scene.pkg bytes and empty directories all count. Root path, timestamps,
+permissions and unpacked package entries do not. Symlinks, special files,
+non-UTF-8 names and detected file/directory changes fail verification. Duplicate
+installed copies of one ID are refused instead of choosing a potentially
+different copy. The [triage scanner](tools/triage/README.md) uses the same format.
+
+The dedicated non-GUI launcher shares this verifier. It validates requested
+assignments, then tries the corresponding last-safe assignment for each rejected
+output and logs the rejection/fallback to stderr (the service journal). Last-safe
+assignments are stored in `linux-wallpaperengine/last-safe-assignments.json`
+after a verified launch plan and are fully rechecked against the current whitelist
+and disk on every use. If neither request nor fallback verifies, that output is
+omitted. If none verifies, no renderer starts. Legacy WPE_BG also requires a review.
+A missing helper when upgrading from 0.1 fails closed.
+
+A review and matching hash are an authorization record, not a malware detector
+or sandbox. Hashes cover the reviewed local files, not downloaded network content,
+renderer assets, dependencies or files changed after verification. Close Steam
+or pause updates while reviewing/applying when a stable snapshot is needed.
+Renderer/media-parser vulnerabilities and active tampering after verification
+are outside this mechanism.
+
 ## Static wallpaper triage
 
 The stdlib-only [triage tool](tools/triage/README.md) inventories Workshop files
 and packed SceneScript without running wallpapers. Its documentation specifies
 the `wpe-gallery-content-v1` SHA-256 contract for whitelist integration. Private scan
 results and review decisions are kept outside this repository.
+
+
+Pointer regression (requires an agent-owned headless sway, clang and Wayland
+development tools; installs nothing):
+
+```sh
+python3 tests/gui_pointer.py /private/path/headless-env.json
+```
+
+The environment JSON must specify the test compositor's WAYLAND_DISPLAY and
+SWAYSOCK. The test refuses non-HEADLESS outputs, uses synthetic wallpapers and a
+mock systemctl, and stops its app and virtual pointer afterwards. The caller owns
+compositor teardown. Do not point it at a live desktop.
