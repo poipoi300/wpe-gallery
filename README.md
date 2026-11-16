@@ -149,3 +149,10 @@ Renderer compatibility belongs in linux-wallpaperengine; gallery issues tagged
 `upstream` distinguish that work.
 
 MIT licensed; see [LICENSE](LICENSE).
+
+## Static wallpaper triage
+
+The stdlib-only [triage tool](tools/triage/README.md) inventories Workshop files
+and packed SceneScript without running wallpapers. Its documentation specifies
+the `wpe-gallery-content-v1` SHA-256 contract for whitelist integration. Private scan
+results and review decisions are kept outside this repository.
