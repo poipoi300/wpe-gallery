@@ -123,8 +123,9 @@ private temporary directory; after 15 s without it (for example, paused behind a
 fullscreen window) the old renderer is replaced anyway. A replacement that exits
 before presenting leaves the current renderer running and is logged; a reload in
 which no assignment verifies stops the renderer, as a restart would. Units without
-`ExecReload` are restarted. Install the unit and the launcher together: an
-older exec-style launcher would treat the reload signal as a request to exit.
+`ExecReload` are restarted. The reload needs wpe-gallery 0.2.5 or newer; with
+an older exec-style launcher the renderer exits on SIGHUP and the unit restarts
+it, with the old gap.
 `wallpaper.env` is read when the unit starts, so restart the unit after
 editing it. Video wallpapers draw black until their first
 decoded frame (about 0.6 s), which the swap cannot hide because the new surface

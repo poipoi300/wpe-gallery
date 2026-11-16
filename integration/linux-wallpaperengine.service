@@ -11,7 +11,8 @@ ExecStart=%h/.local/bin/wallpaperengine-start
 # wpe-gallery-launch stays the main process and supervises the renderer.
 # Reload (used by Apply) starts the newly verified renderer first and kills
 # the old one once the new one presents, so no bare background shows.
-# Needs a launcher newer than wpe-gallery 0.2.4; wallpaper.env is read on start only.
+# Needs wpe-gallery 0.2.5 or newer (an older exec-style launcher exits on
+# SIGHUP and is restarted, with a gap); wallpaper.env is read on start only.
 ExecReload=/usr/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5

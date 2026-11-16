@@ -100,10 +100,16 @@ where
         }
         // Settle first, so a replacement that is already presenting is kept
         // rather than discarded by a newer request.
+        let reload = events.contains(&Event::Reload);
         if let Some(status) = settle(&mut current, &mut pending)? {
-            return finished(status);
+            if !reload {
+                return finished(status);
+            }
+            eprintln!(
+                "wallpaperengine-start: renderer exited ({status}); starting the requested one"
+            );
         }
-        if events.contains(&Event::Reload) {
+        if reload {
             // A newer request supersedes a renderer still starting.
             drop(pending.take());
             // Like a restart, a failed verification stops everything.
@@ -260,14 +266,15 @@ mod tests {
     use std::cell::Cell;
 
     /// A fake renderer: records its pid, becomes ready after `delay` seconds
-    /// (or exits with `code` if given), then idles. `shown-N` is written after
-    /// the readiness file, so `shown-N` without `ready-N` means promoted.
+    /// (or exits with `code` if given), then idles. `drawn-N` precedes the
+    /// readiness file and `shown-N` follows it, so `shown-N` without `ready-N`
+    /// means promoted.
     fn fake(dir: &Path, generation: usize, delay: &str, code: Option<i32>) -> Result<Instance> {
         let ready = dir.join(format!("ready-{generation}"));
         let script = match code {
             Some(code) => format!("echo $$ > pid-{generation}; sleep {delay}; exit {code}"),
             None => format!(
-                "echo $$ > pid-{generation}; sleep {delay}; : > \"$1\"; : > shown-{generation}; exec sleep 60"
+                "echo $$ > pid-{generation}; sleep {delay}; : > drawn-{generation}; : > \"$1\"; : > shown-{generation}; exec sleep 60"
             ),
         };
         let mut command = Command::new("sh");
@@ -331,7 +338,7 @@ mod tests {
                         vec![]
                     };
                 }
-                if !d.join("shown-2").exists() {
+                if !d.join("drawn-2").exists() {
                     // Until the new renderer has drawn, the old one must live.
                     assert!(pid(d, 1).is_some_and(alive), "old renderer killed early");
                     return vec![];
