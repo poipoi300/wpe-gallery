@@ -1,11 +1,16 @@
-// Exactly two workers. No timers, filesystem watchers, or background animation.
+// A few thumbnail workers and one selection worker; no filesystem watchers.
 use futures::channel::oneshot;
 use image::{AnimationDecoder, Delay, Frame, ImageDecoder};
 use std::{
     path::PathBuf,
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
+    time::Duration,
 };
-type Reply = oneshot::Sender<Result<Arc<gpui::RenderImage>, String>>;
+/// Decoded frames, each its own single-frame image with its display time.
+/// The gallery advances animated previews on a timer at the GIF's own rate;
+/// a multi-frame `RenderImage` would make GPUI redraw every display refresh.
+pub type Frames = Vec<(Arc<gpui::RenderImage>, Duration)>;
+type Reply = oneshot::Sender<Result<Frames, String>>;
 struct Job {
     path: PathBuf,
     animate: bool,
@@ -20,18 +25,16 @@ impl Pool {
     pub fn new() -> Self {
         let (thumbnails, rx) = mpsc::sync_channel::<Job>(64);
         let (selected, selected_rx) = mpsc::channel::<Job>();
-        for receiver in [rx, selected_rx] {
-            std::thread::spawn(move || {
-                while let Ok(job) = receiver.recv() {
-                    if job.reply.is_canceled() {
-                        continue;
-                    }
-                    let result =
-                        decode(&job.path, job.animate, &job.reply).map_err(|e| e.to_string());
-                    let _ = job.reply.send(result);
-                }
-            });
+        // Thumbnail decodes (mostly large JPEGs) are the scroll-in bottleneck;
+        // a few workers keep up without taking over the machine.
+        let workers = std::thread::available_parallelism().map_or(1, |n| (n.get() / 4).clamp(1, 3));
+        let rx = Arc::new(Mutex::new(rx));
+        for _ in 0..workers {
+            let rx = rx.clone();
+            // The lock is held only while waiting, so jobs go out one at a time.
+            std::thread::spawn(move || serve(|| rx.lock().unwrap().recv()));
         }
+        std::thread::spawn(move || serve(|| selected_rx.recv()));
         Self {
             thumbnails,
             selected,
@@ -41,7 +44,7 @@ impl Pool {
         &self,
         path: PathBuf,
         animate: bool,
-    ) -> Option<oneshot::Receiver<Result<Arc<gpui::RenderImage>, String>>> {
+    ) -> Option<oneshot::Receiver<Result<Frames, String>>> {
         let (reply, receiver) = oneshot::channel();
         let job = Job {
             path,
@@ -56,12 +59,21 @@ impl Pool {
         Some(receiver)
     }
 }
-fn decode(path: &PathBuf, animate: bool, reply: &Reply) -> anyhow::Result<Arc<gpui::RenderImage>> {
+fn serve(mut next: impl FnMut() -> Result<Job, mpsc::RecvError>) {
+    while let Ok(job) = next() {
+        if job.reply.is_canceled() {
+            continue;
+        }
+        let result = decode(&job.path, job.animate, &job.reply).map_err(|e| e.to_string());
+        let _ = job.reply.send(result);
+    }
+}
+fn decode(path: &PathBuf, animate: bool, reply: &Reply) -> anyhow::Result<Frames> {
     anyhow::ensure!(
         std::fs::metadata(path)?.len() <= 32 * 1024 * 1024,
         "Preview exceeds 32 MiB"
     );
-    let mut frames = smallvec::SmallVec::<[Frame; 1]>::new();
+    let mut frames = Vec::<Frame>::new();
     let max = if animate { 48 } else { 1 };
     use std::io::{Read, Seek};
     let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
@@ -93,7 +105,16 @@ fn decode(path: &PathBuf, animate: bool, reply: &Reply) -> anyhow::Result<Arc<gp
         ));
     }
     anyhow::ensure!(!frames.is_empty(), "Empty preview");
-    Ok(Arc::new(gpui::RenderImage::new(frames)))
+    Ok(frames
+        .into_iter()
+        .map(|frame| {
+            let delay = Duration::from(frame.delay());
+            (
+                Arc::new(gpui::RenderImage::new(smallvec::smallvec![frame])),
+                delay,
+            )
+        })
+        .collect())
 }
 fn convert(buffer: image::RgbaImage, delay: Delay, large: bool) -> Frame {
     let image = image::DynamicImage::ImageRgba8(buffer)

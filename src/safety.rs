@@ -32,6 +32,8 @@ pub struct Status {
     pub label: &'static str,
     pub allowed: bool,
     pub reason: String,
+    /// The matching whitelist entry for Safe and Blocked items.
+    pub review: Option<Review>,
 }
 impl Status {
     pub fn unreviewed(reason: impl Into<String>) -> Self {
@@ -39,6 +41,7 @@ impl Status {
             label: "Unreviewed",
             allowed: false,
             reason: reason.into(),
+            review: None,
         }
     }
 }
@@ -95,6 +98,7 @@ pub fn assess(
             label: "Blocked",
             allowed: false,
             reason: format!("Blocked by {}: {}", r.reviewer, r.notes),
+            review: Some(r.clone()),
         };
     }
     let hash = match cache {
@@ -106,6 +110,7 @@ pub fn assess(
             label: "Safe",
             allowed: true,
             reason: format!("Reviewed {} by {}. {}", r.reviewed, r.reviewer, r.notes),
+            review: Some(r.clone()),
         },
         Ok(_) => Status::unreviewed("Content changed since review. A new review is required."),
         Err(e) => Status::unreviewed(format!("Cannot verify content: {e:#}")),

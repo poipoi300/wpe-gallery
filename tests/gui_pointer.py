@@ -63,6 +63,8 @@ def click(x, y, hold=.15):
     ipc("seat", "-", "cursor", "set", str(x), str(y))
     ipc("seat", "-", "cursor", "press", "button1"); time.sleep(hold)
     ipc("seat", "-", "cursor", "release", "button1"); time.sleep(.3)
+# Apply is pinned to the bottom of the details pane (1152 logical px tall).
+APPLY_Y = 1110
 def capture(name):
     subprocess.run(["grim", "-o", "HEADLESS-1", str(artifact / name)], env=env, check=True)
 try:
@@ -72,13 +74,13 @@ try:
     # Image click and held press across redraws.
     click(400, 230, .4)
     capture("selected-by-pointer.png")
-    click(3900, 692)
+    click(3900, APPLY_Y)
     assignment = config / "linux-wallpaperengine/assignments.json"
     assert json.loads(assignment.read_text())["outputs"]["HEADLESS-1"]["wallpaper_id"] == "1002"
     assert (artifact / "systemctl.log").read_text().strip() == "--user restart linux-wallpaperengine.service"
-    # Title click selects first safe item; Apply button uses its shorter details layout.
-    click(100, 280)
-    click(3900, 625)
+    # Title click selects the first safe item.
+    click(100, 235)
+    click(3900, APPLY_Y)
     assert json.loads(assignment.read_text())["outputs"]["HEADLESS-1"]["wallpaper_id"] == "1001"
     # Turn off safe-only and select blocked/unreviewed/changed fixtures. Enter
     # isn't needed: even clicking the disabled Apply area must not restart.
@@ -87,7 +89,7 @@ try:
     count = len((artifact / "systemctl.log").read_text().splitlines())
     for x in [700, 1000, 1300]:
         click(x, 230)
-        for y in [625, 650, 692, 720]:
+        for y in [APPLY_Y - 15, APPLY_Y, APPLY_Y + 15]:
             click(3900, y)
         assert len((artifact / "systemctl.log").read_text().splitlines()) == count
     print("PASS: fractional-scale image/title selection, Apply, Safe-only and unsafe refusal")
