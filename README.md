@@ -179,7 +179,10 @@ Zero hashes above are placeholders, not reviews. Use `blocked` and explain the
 reason in `notes` for blocklist entries. A safe entry must have a lowercase
 64-character SHA-256 content hash. Required fields are verdict, reviewed
 (YYYY-MM-DD), reviewer (nonempty), notes and content_hash. Missing/malformed
-whitelists authorize nothing.
+whitelists authorize nothing. Entries may optionally include `type` (for example
+`scene`, `video` or `web`) and other producer metadata. Unknown per-entry fields
+are ignored; they do not authorize an item or replace any required field or its
+validation.
 
 Safe-only filtering starts on. Tiles and details show Safe, Unreviewed or Blocked.
 A safe verdict becomes Safe only after its complete local tree matches its review.

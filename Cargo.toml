@@ -1,7 +1,7 @@
 [package]
 name = "wpe-gallery"
 default-run = "wpe-gallery"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT"
 description = "A GPUI gallery for Wallpaper Engine wallpapers on Linux"

@@ -40,7 +40,8 @@ fn launcher_requires_review_rechecks_fallback_and_passes_verified_paths() {
     fs::create_dir_all(whitelist.parent().unwrap()).unwrap();
     assert!(!run(&home, &config, &["--renderer-args"]).status.success());
     let hash = wpe_gallery::safety::content_hash(&one).unwrap();
-    let review = json!({"verdict":"safe","reviewed":"2026-11-16","reviewer":"synthetic test","notes":"","content_hash":hash});
+    let review = json!({"verdict":"safe","reviewed":"2026-11-16","reviewer":"synthetic test","notes":"","content_hash":hash,
+        "type":"scene", "future_metadata":{"tool_version":2}});
     fs::write(
         &whitelist,
         serde_json::to_vec(&json!({"1001":review})).unwrap(),
@@ -75,6 +76,42 @@ fn launcher_requires_review_rechecks_fallback_and_passes_verified_paths() {
     assert!(!run(&home, &config, &["--renderer-args"]).status.success());
     fs::write(&whitelist, b"{broken").unwrap();
     assert!(!run(&home, &config, &["--renderer-args"]).status.success());
+}
+#[test]
+fn extra_review_metadata_does_not_relax_required_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("whitelist.json");
+    let review = json!({"verdict":"safe","reviewed":"2026-11-16","reviewer":"synthetic test","notes":"", "content_hash":"a".repeat(64),
+        "type":"video", "future_metadata":[1,{"source":"triage"}]});
+    let write = |entry: &Value| {
+        fs::write(&path, serde_json::to_vec(&json!({"1001":entry})).unwrap()).unwrap();
+    };
+    write(&review);
+    assert!(wpe_gallery::safety::read_whitelist(&path).is_ok());
+    for field in ["verdict", "reviewed", "reviewer", "notes", "content_hash"] {
+        let mut missing = review.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        write(&missing);
+        assert!(
+            wpe_gallery::safety::read_whitelist(&path).is_err(),
+            "missing {field}"
+        );
+    }
+    for (field, value) in [
+        ("verdict", json!("unreviewed")),
+        ("reviewed", json!("invalid")),
+        ("reviewer", json!(" ")),
+        ("notes", Value::Null),
+        ("content_hash", json!("invalid")),
+    ] {
+        let mut invalid = review.clone();
+        invalid[field] = value;
+        write(&invalid);
+        assert!(
+            wpe_gallery::safety::read_whitelist(&path).is_err(),
+            "invalid {field}"
+        );
+    }
 }
 #[test]
 fn matches_independent_wpe_gallery_content_v1_golden() {

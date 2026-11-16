@@ -16,7 +16,8 @@ pub enum Verdict {
     Blocked,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+// Review producers may attach metadata (for example `type`). Serde ignores
+// those fields; the authorization fields below remain required and validated.
 pub struct Review {
     pub verdict: Verdict,
     pub reviewed: String,
