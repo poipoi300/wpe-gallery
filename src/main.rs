@@ -1,18 +1,20 @@
 use wpe_gallery::{backend, library, renderer, safety};
 mod grid;
-mod icons;
 mod preview;
+mod surface;
 mod title;
+mod ui;
 mod verification;
 use anyhow::Context as _;
 use backend::ApplyBackend;
 use futures::StreamExt as _;
-use gpui::{prelude::*, *};
+use gpui::*;
+use gpui_component::{Root, VirtualListScrollHandle};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 use verification::Verification;
 struct Gallery {
@@ -38,14 +40,13 @@ struct Gallery {
     large_task: Option<Task<()>>,
     animation: Option<Task<()>>,
     cache_limit: usize,
-    titles: title::Titles,
-    title_task: Option<Task<()>>,
     // Tile under the pointer and when it got there (drives the title marquee).
     hovered: Option<(usize, Instant)>,
     // The one pending repaint at the end of a marquee pause.
     marquee_wake: title::Wake,
     review_open: bool,
-    scroll: UniformListScrollHandle,
+    scroll: VirtualListScrollHandle,
+    row_sizes: std::rc::Rc<Vec<Size<Pixels>>>,
     scroll_selection: bool,
     last_columns: usize,
     focus: FocusHandle,
@@ -60,6 +61,7 @@ struct Gallery {
 }
 struct Thumbnail {
     image: Option<Arc<RenderImage>>,
+    light: surface::EdgeLight,
     used: u64,
 }
 /// Messages from the verification worker to the gallery.
@@ -143,12 +145,11 @@ impl Gallery {
             large_task: None,
             animation: None,
             cache_limit: 256,
-            titles: title::Titles::default(),
-            title_task: None,
             hovered: None,
             marquee_wake: title::Wake::default(),
             review_open: false,
-            scroll: UniformListScrollHandle::new(),
+            scroll: VirtualListScrollHandle::new(),
+            row_sizes: Default::default(),
             scroll_selection: true,
             last_columns: 0,
             focus: cx.focus_handle(),
@@ -382,6 +383,10 @@ impl Gallery {
                         this.thumbnails.insert(
                             index,
                             Thumbnail {
+                                light: image
+                                    .as_ref()
+                                    .map(|(image, _)| surface::EdgeLight::sample(image))
+                                    .unwrap_or_default(),
                                 image: image.map(|(image, _)| image),
                                 used: this.frame,
                             },
@@ -411,24 +416,6 @@ impl Gallery {
                 cx.drop_image(image, None);
             }
         }
-    }
-    /// Shape every tile title in idle slices so scrolling never waits on text.
-    fn prewarm_titles(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.title_task = Some(cx.spawn_in(window, async move |this, cx| {
-            loop {
-                let done = this.update_in(cx, |this, window, _| {
-                    let titles = this.items.iter().map(|i| i.title.as_str());
-                    this.titles
-                        .prewarm(titles, window, Duration::from_millis(2))
-                });
-                if !matches!(done, Ok(false)) {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(Duration::from_millis(8))
-                    .await;
-            }
-        }));
     }
     /// Cancel decodes for tiles the last frame no longer displayed.
     fn cancel_offscreen_thumbnails(&mut self) {
@@ -484,111 +471,7 @@ impl Gallery {
         .detach();
     }
 }
-const CANVAS: u32 = 0x181b20;
-const PANE: u32 = 0x22262d;
-const GROUND: u32 = 0x121519;
-pub(crate) const FOREGROUND: u32 = 0xedf0f4;
-const SECONDARY: u32 = 0xb6beca;
-const CONTROL: u32 = 0x303741;
-const DIVIDER: u32 = 0x363d47;
-fn button(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .px_4()
-        .py_2()
-        .rounded_sm()
-        .bg(rgb(CONTROL))
-        .text_color(rgb(FOREGROUND))
-        .cursor_pointer()
-        .hover(|s| s.bg(rgb(0x414c5b)))
-        .child(text.into())
-}
 impl Gallery {
-    fn hover(&mut self, index: usize, hovered: bool, cx: &mut Context<Self>) {
-        if hovered == (self.hovered.map(|(i, _)| i) == Some(index)) {
-            return;
-        }
-        self.hovered = hovered.then(|| (index, Instant::now()));
-        cx.notify();
-    }
-    fn tile(
-        &mut self,
-        index: usize,
-        width: f32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let source = self.thumb(index, cx);
-        let line = self.titles.line(index, &self.items[index].title, window);
-        let ellipsis = self.titles.ellipsis(window);
-        let hovered_since = self.hovered.filter(|(i, _)| *i == index).map(|(_, t)| t);
-        let status = &self.safety[index];
-        let artwork = div()
-            .relative()
-            .w_full()
-            .flex_1()
-            .min_h_0()
-            .bg(rgb(GROUND))
-            .overflow_hidden()
-            .flex()
-            .items_center()
-            .justify_center()
-            .map(|s| match source {
-                Some(source) => s.child(img(source).size_full().object_fit(ObjectFit::Cover)),
-                None => s.text_xs().text_color(rgb(SECONDARY)).child("No preview"),
-            })
-            // Safe items carry no badge; others (only listed with Safe only
-            // off) keep a quiet reminder over the artwork.
-            .when(!status.allowed, |s| {
-                s.child(
-                    div()
-                        .absolute()
-                        .top_1()
-                        .left_1()
-                        .px_1p5()
-                        .rounded_sm()
-                        .bg(rgba(0x181b20e6))
-                        .text_xs()
-                        .text_color(rgb(SECONDARY))
-                        .child(status.label),
-                )
-            });
-        div()
-            .id(("tile", index))
-            .w(px(width))
-            .flex_shrink_0()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(PANE))
-            .border_2()
-            .border_color(if index == self.selected {
-                rgb(0x569dff)
-            } else {
-                rgb(CONTROL)
-            })
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(CONTROL)))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.choose(index, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .on_hover(
-                cx.listener(move |this, hovered: &bool, _, cx| this.hover(index, *hovered, cx)),
-            )
-            .relative()
-            .child(artwork)
-            .child(div().flex_shrink_0().h(px(title::BANNER_HEIGHT)))
-            .child(
-                title::title(line, ellipsis, hovered_since, self.marquee_wake.clone())
-                    .absolute()
-                    .inset_0(),
-            )
-    }
     /// Keep decodes for the rows just outside the viewport, so thumbnails are
     /// usually ready by the time a row scrolls in.
     fn prefetch(&mut self, rows: std::ops::Range<usize>, columns: usize, cx: &mut Context<Self>) {
@@ -597,427 +480,6 @@ impl Gallery {
         for position in start..end {
             self.thumb(self.visible[position], cx);
         }
-    }
-    fn review(&self, cx: &mut Context<Self>) -> AnyElement {
-        let status = &self.safety[self.selected];
-        if !status.allowed {
-            return div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(format!("{}: Apply unavailable", status.label)),
-                )
-                .child(
-                    div()
-                        .text_color(rgb(SECONDARY))
-                        .child(status.reason.clone()),
-                )
-                .into_any_element();
-        }
-        let review = status.review.as_ref();
-        let summary = review.map_or("Marked safe".into(), |r| {
-            format!("Marked safe by {}", r.reviewer)
-        });
-        let open = self.review_open && review.is_some();
-        let field = |label: &'static str, value: SharedString| {
-            div()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .child(div().text_xs().text_color(rgb(SECONDARY)).child(label))
-                .child(value)
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                div()
-                    .id("review-toggle")
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .text_color(rgb(SECONDARY))
-                    .when(review.is_some(), |s| {
-                        s.cursor_pointer()
-                            .hover(|s| s.text_color(rgb(FOREGROUND)))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.review_open = !this.review_open;
-                                cx.notify();
-                            }))
-                            .child(icons::chevron(open, rgb(SECONDARY).into()))
-                    })
-                    .child(summary),
-            )
-            .when_some(review.filter(|_| open), |s, r| {
-                s.child(
-                    div()
-                        .pl(px(18.))
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(field("Reviewed", r.reviewed.clone().into()))
-                        .child(field(
-                            "Notes",
-                            if r.notes.trim().is_empty() {
-                                "No notes".into()
-                            } else {
-                                r.notes.clone().into()
-                            },
-                        ))
-                        .child(
-                            field("Content hash (SHA-256)", r.content_hash.clone().into())
-                                .font_family("monospace")
-                                .text_xs(),
-                        ),
-                )
-            })
-            .into_any_element()
-    }
-    fn details(&self, cx: &mut Context<Self>) -> Div {
-        let item = self
-            .items
-            .get(self.selected)
-            .filter(|_| self.visible.contains(&self.selected));
-        let mut body = div()
-            .id("details")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .p_5()
-            .flex()
-            .flex_col()
-            .gap_4();
-        let Some(item) = item else {
-            return div()
-                .w(px(340.))
-                .flex_shrink_0()
-                .h_full()
-                .bg(rgb(PANE))
-                .child(body.child("Select a wallpaper to see its details."));
-        };
-        let source = self
-            .large
-            .get(self.large_frame)
-            .map(|(image, _)| image.clone())
-            .or_else(|| {
-                self.thumbnails
-                    .get(&self.selected)
-                    .and_then(|t| t.image.clone())
-            });
-        body = body
-            .child(
-                div()
-                    .w_full()
-                    .h(px(210.))
-                    .flex_shrink_0()
-                    .bg(rgb(GROUND))
-                    .flex()
-                    .justify_center()
-                    .items_center()
-                    .map(|s| match source {
-                        Some(source) => s.child(
-                            img(source)
-                                .id(("selected", self.generation))
-                                .size_full()
-                                .object_fit(ObjectFit::Contain),
-                        ),
-                        None => s.child("Preview unavailable"),
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(item.title.clone()),
-                    )
-                    .child(div().text_color(rgb(SECONDARY)).child(format!(
-                        "{}  ·  Workshop {}",
-                        item.kind.to_uppercase(),
-                        item.id
-                    ))),
-            )
-            .child(self.review(cx))
-            .when(!item.tags.is_empty(), |s| {
-                s.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .children(item.tags.iter().map(|t| {
-                            div()
-                                .px_2()
-                                .py_1()
-                                .bg(rgb(CONTROL))
-                                .rounded_sm()
-                                .text_sm()
-                                .child(t.clone())
-                        })),
-                )
-            })
-            .child(div().text_sm().text_color(rgb(SECONDARY)).child(
-                if item.description.is_empty() {
-                    "No description provided.".to_string()
-                } else {
-                    item.description.clone()
-                },
-            ))
-            .child(div().text_sm().text_color(rgb(SECONDARY)).child(format!(
-                "{} configurable properties · editor coming later",
-                item.properties.as_object().map_or(0, |p| p.len())
-            )));
-        let allowed = self.safety[self.selected].allowed;
-        let enabled = !self.busy && !self.outputs.is_empty() && allowed;
-        // Apply stays pinned below the scrolling details, with its feedback.
-        let footer = div()
-            .flex_shrink_0()
-            .px_5()
-            .py_4()
-            .border_t_1()
-            .border_color(rgb(DIVIDER))
-            .flex()
-            .flex_col()
-            .gap_3()
-            .when(!self.status.is_empty(), |s| {
-                s.child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(SECONDARY))
-                        .child(self.status.clone()),
-                )
-            })
-            .child(
-                button(
-                    "apply",
-                    if self.busy {
-                        "Applying…"
-                    } else {
-                        "Apply wallpaper"
-                    },
-                )
-                .flex()
-                .justify_center()
-                .bg(rgb(0x2866ad))
-                .when(enabled, |s| {
-                    s.on_click(cx.listener(|this, _, _, cx| this.apply(cx)))
-                })
-                .when(!enabled, |s| s.opacity(0.5).cursor_default()),
-            );
-        div()
-            .w(px(340.))
-            .flex_shrink_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(PANE))
-            .child(body)
-            .child(footer)
-    }
-}
-impl Render for Gallery {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        {
-            self.renders += 1;
-        }
-        self.frame += 1;
-        self.cancel_offscreen_thumbnails();
-        let viewport = window.viewport_size();
-        let grid = grid::GridLayout::new(viewport.width.into(), viewport.height.into());
-        let columns = grid.columns;
-        self.cache_limit = grid.cache_limit;
-        if columns != self.last_columns {
-            self.scroll_selection = true;
-            self.last_columns = columns;
-        }
-        if self.scroll_selection {
-            self.scroll.scroll_to_item(
-                self.visible
-                    .iter()
-                    .position(|i| *i == self.selected)
-                    .unwrap_or(0)
-                    / columns,
-                ScrollStrategy::Center,
-            );
-            self.scroll_selection = false;
-        }
-        let rows = self.visible.len().div_ceil(columns);
-        let tile_width = grid.tile_width;
-        let mut top = div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .p_4()
-            .bg(rgb(PANE))
-            .border_b_1()
-            .border_color(rgb(DIVIDER))
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .mr_4()
-                    .child("WPE Gallery"),
-            );
-        for (i, o) in self.outputs.iter().enumerate() {
-            top = top.child(
-                button(
-                    ("output", i),
-                    format!("{}   {} × {}", o.name, o.width, o.height),
-                )
-                .when(i == self.output, |s| s.bg(rgb(0x325c8a)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.output = i;
-                    cx.notify();
-                })),
-            );
-        }
-        if self.outputs.is_empty() {
-            top = top.child("No connected outputs");
-        }
-        let list = uniform_list(
-            "wallpapers",
-            rows,
-            cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
-                let elements = range
-                    .clone()
-                    .map(|row| {
-                        let end = ((row + 1) * columns).min(this.visible.len());
-                        div()
-                            .flex()
-                            .gap_3()
-                            .h(px(grid::ROW_HEIGHT))
-                            .pb_3()
-                            .children((row * columns..end).map(|position| {
-                                this.tile(this.visible[position], tile_width, window, cx)
-                            }))
-                    })
-                    .collect();
-                this.prefetch(range, columns, cx);
-                elements
-            }),
-        )
-        .with_sizing_behavior(ListSizingBehavior::Auto)
-        .w_full()
-        .track_scroll(self.scroll.clone())
-        .flex_1()
-        .min_h_0();
-        let gallery =
-            div()
-                .relative()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .flex()
-                .flex_col()
-                .pt_4()
-                .px_4()
-                .gap_3()
-                .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .child(format!(
-                            "Installed wallpapers  ·  {} of {}",
-                            self.visible.len(),
-                            self.items.len()
-                        ))
-                        .child(
-                            div()
-                                .text_color(rgb(SECONDARY))
-                                .child("Arrow keys Select   ·   Tab Display   ·   Enter Apply"),
-                        ),
-                )
-                .when(self.visible.is_empty(), |s| {
-                    s.child(self.verification.empty_message(!self.items.is_empty()))
-                })
-                .when(!self.visible.is_empty(), |s| {
-                    s.when_some(self.verification.progress(), |s, message| s.child(message))
-                        .when(matches!(self.verification, Verification::Failed(_)), |s| {
-                            s.child(self.verification.empty_message(true))
-                        })
-                })
-                .child(list)
-                // Rows scroll under a soft fade at the window's bottom edge.
-                .child(div().absolute().left_0().right_0().bottom_0().h(px(5.)).bg(
-                    linear_gradient(
-                        180.,
-                        linear_color_stop(rgba(0x0000_0000), 0.),
-                        linear_color_stop(rgba(0x0000_0080), 1.),
-                    ),
-                ));
-        div()
-            .track_focus(&self.focus)
-            .key_context("Gallery")
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(CANVAS))
-            .font_family("sans-serif")
-            .text_sm()
-            .text_color(rgb(FOREGROUND))
-            .on_action(|_: &Quit, _, cx| cx.quit())
-            .on_action(cx.listener(|this, _: &Apply, _, cx| this.apply(cx)))
-            .on_action(
-                cx.listener(|this, _: &Next, _, cx| this.move_selection(grid::Step::Next, cx)),
-            )
-            .on_action(cx.listener(|this, _: &Previous, _, cx| {
-                this.move_selection(grid::Step::Previous, cx)
-            }))
-            .on_action(cx.listener(|this, _: &Up, _, cx| this.move_selection(grid::Step::Up, cx)))
-            .on_action(
-                cx.listener(|this, _: &Down, _, cx| this.move_selection(grid::Step::Down, cx)),
-            )
-            .on_action(cx.listener(|this, _: &NextOutput, _, cx| {
-                if !this.outputs.is_empty() {
-                    this.output = (this.output + 1) % this.outputs.len();
-                    cx.notify();
-                }
-            }))
-            .child(top)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py_2()
-                    .child(
-                        button(
-                            "safe-filter",
-                            if self.safe_only {
-                                "Safe only: on"
-                            } else {
-                                "Safe only: off"
-                            },
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.safe_only = !this.safe_only;
-                            this.scroll_selection = true;
-                            this.rebuild_visible(cx);
-                        })),
-                    )
-                    .child(
-                        button("refresh-reviews", "Reload reviews")
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh_safety(cx))),
-                    )
-                    .child("Only reviewed, unchanged items can be applied."),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(gallery)
-                    .child(self.details(cx)),
-            )
     }
 }
 // GPUI and its renderer report swapchain/present problems through `log`.
@@ -1082,8 +544,9 @@ fn main() -> anyhow::Result<()> {
         warnings.len()
     );
     Application::new()
-        .with_assets(icons::Assets)
+        .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
+            ui::init(cx);
             cx.bind_keys([
                 KeyBinding::new("ctrl-q", Quit, None),
                 KeyBinding::new("enter", Apply, Some("Gallery")),
@@ -1115,13 +578,13 @@ fn main() -> anyhow::Result<()> {
                     ..Default::default()
                 },
                 |window, cx| {
-                    cx.new(|cx| {
+                    let gallery = cx.new(|cx| {
                         let mut gallery = Gallery::new(items, outputs, initial, cx);
                         gallery.focus.focus(window);
                         gallery.refresh_safety(cx);
-                        gallery.prewarm_titles(window, cx);
                         gallery
-                    })
+                    });
+                    cx.new(|cx| Root::new(gallery, window, cx))
                 },
             )
             .expect("open gallery window");
@@ -1133,7 +596,7 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     // Not `super::*`: GPUI's glob export includes a `test` macro that would
     // shadow the built-in attribute `#[gpui::test]` expands to.
-    use super::{Gallery, PathBuf, Update, Verification, library, safety};
+    use super::{Gallery, PathBuf, Update, Verification, library, safety, ui};
     use gpui::TestAppContext;
     use std::{cell::Cell, rc::Rc};
     fn wallpaper(id: &str) -> library::Wallpaper {
@@ -1161,6 +624,7 @@ mod tests {
     #[gpui::test]
     fn background_verification_rerenders_root_view(cx: &mut TestAppContext) {
         let items = vec![wallpaper("1"), wallpaper("2"), wallpaper("3")];
+        cx.update(ui::init);
         let window = cx.add_window(|_, cx| Gallery::new(items, Vec::new(), Some(0), cx));
         let gallery = window.root(cx).unwrap();
         let notifications = Rc::new(Cell::new(0));
@@ -1206,6 +670,7 @@ mod tests {
     #[gpui::test]
     fn missing_selection_falls_back_only_after_verification(cx: &mut TestAppContext) {
         let items = vec![wallpaper("1"), wallpaper("2")];
+        cx.update(ui::init);
         let window = cx.add_window(|_, cx| Gallery::new(items, Vec::new(), Some(1), cx));
         let gallery = window.root(cx).unwrap();
         let (sender, receiver) = futures::channel::mpsc::unbounded();
