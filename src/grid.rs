@@ -1,5 +1,4 @@
 // Geometry is recomputed from the configured client viewport each render.
-pub const INSPECTOR: f32 = 344.;
 pub const GUTTER: f32 = 24.;
 pub const GAP: f32 = 14.;
 pub struct GridLayout {
@@ -25,9 +24,9 @@ impl GridLayout {
         Some((y / self.row_height) as usize * self.columns + column)
     }
 
-    pub fn new(width: f32, height: f32) -> Self {
-        let available = (width - INSPECTOR - 2. * GUTTER).max(80.);
-        let columns = (((available + GAP) / (215. + GAP)).floor() as usize).clamp(1, 12);
+    pub fn new(library_width: f32, height: f32, target: f32) -> Self {
+        let available = (library_width - 2. * GUTTER).max(80.);
+        let columns = (((available + GAP) / (target + GAP)).floor() as usize).clamp(1, 12);
         let tile_width = (available - GAP * (columns - 1) as f32) / columns as f32;
         let row_height = (tile_width * 9. / 16.).round() + 42. + GAP;
         // About four viewports of thumbnails (256×144 RGBA, ~144 KiB each):
@@ -75,26 +74,26 @@ mod tests {
     use super::*;
     #[test]
     fn first_configure_and_tiled_resize_recompute_finite_geometry() {
-        let initial = GridLayout::new(0., 0.);
+        let initial = GridLayout::new(0., 0., 215.);
         assert_eq!(initial.columns, 1);
-        let tiled = GridLayout::new(1331., 1107.);
+        let tiled = GridLayout::new(1331. - 344., 1107., 215.);
         assert_eq!(tiled.columns, 4);
         assert!(tiled.tile_width.is_finite() && tiled.tile_width > 80.);
         assert!(
             tiled.columns as f32 * tiled.tile_width + GAP * (tiled.columns - 1) as f32
-                <= 1331. - INSPECTOR - 2. * GUTTER + 0.01
+                <= 1331. - 344. - 2. * GUTTER + 0.01
         );
-        let resized = GridLayout::new(1336., 1107.);
+        let resized = GridLayout::new(1336. - 344., 1107., 215.);
         assert_eq!(tiled.columns, resized.columns);
         assert_ne!(tiled.tile_width, resized.tile_width);
-        let fullscreen = GridLayout::new(4096., 1152.);
+        let fullscreen = GridLayout::new(4096. - 344., 1152., 215.);
         assert_eq!(fullscreen.columns, 12);
         // Four viewports of 12 columns × (6 visible + 2) rows.
         assert_eq!(fullscreen.cache_limit, 384);
     }
     #[test]
     fn stationary_pointer_tracks_the_tile_through_scroll_and_gutters() {
-        let grid = GridLayout::new(1331., 900.);
+        let grid = GridLayout::new(1331. - 344., 900., 215.);
         assert_eq!(grid.position_at(25., 60.), Some(0));
         assert_eq!(grid.position_at(25., 65.), Some(0));
         assert_eq!(grid.position_at(25., grid.row_height - 1.), None);

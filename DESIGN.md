@@ -53,13 +53,15 @@ components:
 
 ## Surfaces and light
 
-A single static grain image gives the black canvas a matte finish. A translucent inspector lets that texture show through. Each thumbnail supplies two color samples, averaged from the left and right halves with extra weight for brighter pixels. These colors tint the caption, the shadow under the artwork, and the selected preview's surround. Pearl green identifies the selected tile and the Apply action across all artwork colors.
+A single static grain image gives the black canvas a matte finish. A translucent inspector lets that texture show through. A thumbnail’s caption reflects the bottom edge of its visible crop. The inspector extends a small blurred copy of the current preview frame past its edges, with the light fading into black. The decoder prepares these textures once per frame. Pearl green identifies the selected tile and the Apply action across all artwork colors.
 
 ## Layout
 
-The header holds the application name and a display menu showing the active output and its resolution. The virtualized library has one to twelve columns of 16:9 crops. A title sits below each image and scrolls on hover when it exceeds the caption width. The filter and review reload control move below the library heading in narrow windows. Keyboard hints stay beneath the grid.
+The library opens directly on the grid. It has one to twelve columns of 16:9 crops. A title sits below each image and scrolls on hover when it exceeds the caption width. The pearl outline follows the item being inspected. An “On” badge identifies the saved assignment for the chosen display.
 
-The 344-pixel inspector fits the entire selected preview in an aspect-aware frame. It lists tags, type, Workshop ID, property count, description and verification status. Review details expand to show the reviewer, date, notes and hash. The body scrolls independently above the pinned Apply button.
+The right-hand inspector contains the display menu and settings gear. Drag its divider to resize it from the default width of 344 logical pixels. The gear holds thumbnail size, artwork edge lighting, the Safe only filter and Reload reviews. Thumbnail size, lighting and the preferred sidebar width persist between launches.
+
+The inspector fits the entire selected preview in an aspect-aware frame. It lists tags, type, Workshop ID, property count, description and verification status. Review details expand to show the reviewer, date, notes and hash. The body scrolls independently above the pinned Apply button.
 
 ## Components and states
 

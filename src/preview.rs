@@ -9,7 +9,20 @@ use std::{
 /// Decoded frames, each its own single-frame image with its display time.
 /// The gallery advances animated previews on a timer at the GIF's own rate;
 /// a multi-frame `RenderImage` would make GPUI redraw every display refresh.
-pub type Frames = Vec<(Arc<gpui::RenderImage>, Duration)>;
+pub type Frames = Vec<PreviewFrame>;
+#[derive(Clone)]
+pub struct PreviewFrame {
+    pub image: Arc<gpui::RenderImage>,
+    pub reflection: Arc<gpui::RenderImage>,
+    pub delay: Duration,
+}
+
+impl PreviewFrame {
+    pub fn release(self, cx: &mut gpui::App) {
+        cx.drop_image(self.image, None);
+        cx.drop_image(self.reflection, None);
+    }
+}
 type Reply = oneshot::Sender<Result<Frames, String>>;
 struct Job {
     path: PathBuf,
@@ -105,16 +118,24 @@ fn decode(path: &PathBuf, animate: bool, reply: &Reply) -> anyhow::Result<Frames
         ));
     }
     anyhow::ensure!(!frames.is_empty(), "Empty preview");
-    Ok(frames
+    frames
         .into_iter()
         .map(|frame| {
+            anyhow::ensure!(!reply.is_canceled(), "Preview superseded");
             let delay = Duration::from(frame.delay());
-            (
-                Arc::new(gpui::RenderImage::new(smallvec::smallvec![frame])),
+            let image = Arc::new(gpui::RenderImage::new(smallvec::smallvec![frame]));
+            let reflection = if animate {
+                crate::surface::surround(&image)
+            } else {
+                crate::surface::caption(&image)
+            };
+            Ok(PreviewFrame {
+                image,
+                reflection,
                 delay,
-            )
+            })
         })
-        .collect())
+        .collect()
 }
 fn convert(buffer: image::RgbaImage, delay: Delay, large: bool) -> Frame {
     let image = image::DynamicImage::ImageRgba8(buffer)
@@ -124,4 +145,38 @@ fn convert(buffer: image::RgbaImage, delay: Delay, large: bool) -> Frame {
         pixel.swap(0, 2);
     }
     Frame::from_parts(buffer, 0, 0, delay)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn gif_reflection_matches_each_displayed_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("color-change.gif");
+        let mut encoder =
+            image::codecs::gif::GifEncoder::new(std::fs::File::create(&path).unwrap());
+        for color in [[255, 0, 0, 255], [0, 0, 255, 255]] {
+            encoder
+                .encode_frame(Frame::new(image::RgbaImage::from_pixel(
+                    4,
+                    4,
+                    image::Rgba(color),
+                )))
+                .unwrap();
+        }
+        drop(encoder);
+        let (reply, _receiver) = oneshot::channel();
+        let frames = decode(&path, true, &reply).unwrap();
+        assert_eq!(frames.len(), 2);
+        for frame in frames {
+            let w = frame.reflection.size(0).width.0 as usize;
+            let offset = 4 * (w * 3 + w / 2);
+            let edge = &frame.reflection.as_bytes(0).unwrap()[offset..offset + 4];
+            let art = &frame.image.as_bytes(0).unwrap()[..3];
+            assert!(edge[3] > 0);
+            // Gaussian resampling can round a channel by one level.
+            assert!(edge[..3].iter().zip(art).all(|(a, b)| a.abs_diff(*b) <= 1));
+        }
+    }
 }

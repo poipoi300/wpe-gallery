@@ -1,15 +1,17 @@
 use super::*;
+use crate::preferences::{MAX_SIDEBAR, MIN_SIDEBAR, ThumbnailSize};
 use gpui::prelude::*;
 use gpui_component::{
-    Disableable, Icon, IconName, Sizable, StyledExt, Theme, ThemeMode, box_shadow,
+    Disableable, Icon, IconName, Selectable, Sizable, StyledExt, Theme, ThemeMode,
     button::{Button, ButtonVariants},
     collapsible::Collapsible,
     divider::Divider,
     h_flex,
-    kbd::Kbd,
     label::Label,
     list::ListItem,
     menu::{DropdownMenu, PopupMenuItem},
+    popover::Popover,
+    resizable::{h_resizable, resizable_panel},
     switch::Switch,
     tag::Tag,
     v_flex, v_virtual_list,
@@ -59,10 +61,12 @@ impl Gallery {
         let output = self.outputs.get(self.output);
         let gallery = cx.entity().downgrade();
         let caption = output
-            .map(|o| format!("{}   ·   {} × {}", o.name, o.width, o.height))
+            .map(|o| o.name.clone())
             .unwrap_or_else(|| "No connected outputs".into());
         Button::new("output")
+            .small()
             .label(caption)
+            .tooltip("Target display")
             .icon(IconName::PanelBottom)
             .dropdown_caret(self.outputs.len() > 1)
             .disabled(output.is_none())
@@ -91,6 +95,106 @@ impl Gallery {
             })
     }
 
+    fn settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        let focus = self.focus.clone();
+        Popover::new("gallery-settings")
+            .on_open_change(move |open, window, _| {
+                if !open {
+                    focus.focus(window);
+                }
+            })
+            .anchor(Corner::TopRight)
+            .trigger(
+                Button::new("settings-gear")
+                    .small()
+                    .ghost()
+                    .icon(IconName::Settings)
+                    .tooltip("Gallery settings"),
+            )
+            .content(move |_, _, cx| {
+                let Some(view) = view.upgrade() else {
+                    return v_flex();
+                };
+                let gallery = view.read(cx);
+                let mut sizes = h_flex().gap_1();
+                for (size, label) in [
+                    (ThumbnailSize::Small, "Small"),
+                    (ThumbnailSize::Medium, "Medium"),
+                    (ThumbnailSize::Large, "Large"),
+                ] {
+                    let view = view.downgrade();
+                    sizes = sizes.child(
+                        Button::new(label)
+                            .small()
+                            .compact()
+                            .label(label)
+                            .selected(gallery.prefs.thumbnail_size == size)
+                            .when(gallery.prefs.thumbnail_size == size, |b| b.primary())
+                            .on_click(move |_, _, cx| {
+                                _ = view.update(cx, |this, cx| {
+                                    this.set_preference(|p| p.thumbnail_size = size);
+                                    this.scroll_selection = true;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                let light_view = view.downgrade();
+                let filter_view = view.downgrade();
+                let reload_view = view.downgrade();
+                v_flex()
+                    .w(px(232.))
+                    .p_3()
+                    .gap_3()
+                    .child(Label::new("Gallery settings").font_semibold())
+                    .child(v_flex().gap_1().child(muted("Thumbnail size")).child(sizes))
+                    .child(
+                        Switch::new("artwork-light")
+                            .small()
+                            .label("Artwork edge lighting")
+                            .checked(gallery.prefs.artwork_lighting)
+                            .on_click(move |enable, _, cx| {
+                                _ = light_view.update(cx, |this, cx| {
+                                    this.set_preference(|p| p.artwork_lighting = *enable);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(Divider::horizontal())
+                    .child(
+                        Switch::new("safe-filter")
+                            .small()
+                            .label("Safe only")
+                            .checked(gallery.safe_only)
+                            .on_click(move |enable, _, cx| {
+                                _ = filter_view.update(cx, |this, cx| {
+                                    this.safe_only = *enable;
+                                    this.scroll_selection = true;
+                                    this.rebuild_visible(cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        muted(format!(
+                            "{} of {} wallpapers shown",
+                            gallery.visible.len(),
+                            gallery.items.len()
+                        ))
+                        .text_xs(),
+                    )
+                    .child(
+                        Button::new("reload")
+                            .small()
+                            .label("Reload reviews")
+                            .icon(IconName::Redo2)
+                            .on_click(move |_, _, cx| {
+                                _ = reload_view.update(cx, |this, cx| this.refresh_safety(cx));
+                            }),
+                    )
+            })
+    }
+
     fn tile(
         &mut self,
         index: usize,
@@ -99,12 +203,14 @@ impl Gallery {
         cx: &mut Context<Self>,
     ) -> ListItem {
         let source = self.thumb(index, cx);
-        let light = self
-            .thumbnails
-            .get(&index)
-            .map(|t| t.light)
-            .unwrap_or_default();
+        let light = source
+            .as_ref()
+            .filter(|_| self.prefs.artwork_lighting)
+            .map(|f| f.reflection.clone());
         let selected = index == self.selected;
+        let assigned = self
+            .target_assignment()
+            .filter(|(_, id)| *id == self.items[index].id);
         let status = &self.safety[index];
         let hovered = self
             .hovered
@@ -112,7 +218,7 @@ impl Gallery {
             .map(|(_, since)| since);
         let caption = title::caption(
             &self.items[index].title,
-            width - 26. - if selected { 24. } else { 0. },
+            width - 26.,
             hovered,
             &self.marquee_wake,
             window,
@@ -128,7 +234,7 @@ impl Gallery {
             .overflow_hidden()
             .map(|art| match source {
                 Some(source) => art.child(
-                    img(source)
+                    img(source.image)
                         .size_full()
                         .rounded_t(px(8.))
                         .object_fit(ObjectFit::Cover),
@@ -148,6 +254,19 @@ impl Gallery {
                         linear_color_stop(rgba(0x15171690), 1.),
                     )),
             )
+            .when_some(assigned, |s, (display, _)| {
+                s.child(
+                    h_flex().absolute().bottom_2().left_2().child(
+                        Tag::custom(
+                            rgb(0x19251d).into(),
+                            rgb(PEARL).into(),
+                            rgb(0x516356).into(),
+                        )
+                        .small()
+                        .child(format!("On {display}")),
+                    ),
+                )
+            })
             .when(!status.allowed, |s| {
                 s.child(
                     h_flex().absolute().top_2().left_2().child(
@@ -171,7 +290,6 @@ impl Gallery {
             .bg(rgb(0x202221))
             .border_1()
             .border_color(if selected { rgb(0xb1ccb6) } else { rgb(EDGE) })
-            .shadow(vec![box_shadow(0., 3., 10., -3., light.halo())])
             .child(
                 v_flex()
                     .id(("artwork", index))
@@ -194,16 +312,18 @@ impl Gallery {
                             .px(px(12.))
                             .rounded_b(px(8.))
                             .gap_2()
-                            .bg(light.wash(0.28))
-                            .child(caption)
-                            .when(selected, |s| {
+                            .relative()
+                            .overflow_hidden()
+                            .when_some(light, |s, light| {
                                 s.child(
-                                    Icon::new(IconName::CircleCheck)
-                                        .small()
-                                        .flex_shrink_0()
-                                        .text_color(rgb(PEARL)),
+                                    img(light)
+                                        .absolute()
+                                        .inset_0()
+                                        .size_full()
+                                        .object_fit(ObjectFit::Fill),
                                 )
-                            }),
+                            })
+                            .child(caption),
                     ),
             )
     }
@@ -262,77 +382,84 @@ impl Gallery {
     }
 
     fn details(&self, cx: &mut Context<Self>) -> Div {
-        let mut pane = v_flex()
+        let pane = v_flex()
             .relative()
             .h_full()
-            .w(px(grid::INSPECTOR))
-            .flex_shrink_0()
-            .bg(rgba(0x2426269c))
-            .border_l_1()
-            .border_color(rgb(EDGE));
-        let header = h_flex()
-            .h(px(53.))
-            .px_5()
-            .flex_shrink_0()
+            .w_full()
+            .min_w_0()
+            .bg(rgba(0x2426269c));
+        let tools = h_flex()
+            .justify_between()
             .gap_2()
-            .child(
-                Icon::new(IconName::PanelRight)
-                    .small()
-                    .text_color(rgb(MUTED)),
-            )
-            .child(Label::new("Inspector").font_medium());
+            .px_5()
+            .h(px(52.))
+            .flex_shrink_0()
+            .child(self.output_menu(cx))
+            .child(self.settings(cx));
         let Some(item) = self
             .items
             .get(self.selected)
             .filter(|_| self.visible.contains(&self.selected))
         else {
-            return pane.child(header).child(
+            return pane.child(tools).child(
                 v_flex()
                     .p_5()
                     .child(muted("Select a wallpaper to inspect it.")),
             );
         };
-        let thumb = self.thumbnails.get(&self.selected);
-        let light = thumb.map(|t| t.light).unwrap_or_default();
-        let image = self
-            .large
-            .get(self.large_frame)
-            .map(|(i, _)| i.clone())
-            .or_else(|| thumb.and_then(|t| t.image.clone()));
+        let current = self.large.get(self.large_frame);
+        let image = current
+            .or_else(|| self.thumbnails.get(&self.selected)?.preview.as_ref())
+            .map(|f| f.image.clone());
         let allowed = self.safety[self.selected].allowed;
         let preview_height = image.as_ref().map_or(180., |image| {
             let size = image.size(0);
-            ((grid::INSPECTOR - 42.) * size.height.0 as f32 / size.width.0.max(1) as f32)
+            ((self.sidebar_width - 40.) * size.height.0 as f32 / size.width.0.max(1) as f32)
                 .clamp(150., 300.)
         });
+        let frame_width = (self.sidebar_width - 40.).max(1.);
         let art = v_flex()
+            .relative()
             .w_full()
             .h(px(preview_height))
-            .rounded(px(9.))
-            .overflow_hidden()
+            .flex_shrink_0()
             .items_center()
             .justify_center()
-            .bg(rgb(0x121413))
-            .border_1()
-            .border_color(rgba(0xffffff22))
-            .shadow(vec![box_shadow(0., 6., 24., 0., light.halo())])
-            .child(
-                v_flex()
-                    .size_full()
-                    .items_center()
-                    .justify_center()
-                    .bg(light.wash(0.36))
-                    .map(|s| match image {
-                        Some(i) => s.child(
-                            img(i)
-                                .id(("selected", self.generation))
-                                .rounded(px(8.))
-                                .size_full()
-                                .object_fit(ObjectFit::Contain),
-                        ),
-                        None => s.child(muted("Preview unavailable")),
-                    }),
-            );
+            .map(|s| match image {
+                Some(image) => {
+                    let size = image.size(0);
+                    let ratio = size.width.0 as f32 / size.height.0.max(1) as f32;
+                    let width = frame_width.min(preview_height * ratio);
+                    let height = width / ratio;
+                    let pad_x = width * surface::SPILL_FRACTION;
+                    let pad_y = height * surface::SPILL_FRACTION;
+                    s.when(self.prefs.artwork_lighting, |s| {
+                        s.when_some(current, |s, frame| {
+                            s.child(
+                                img(frame.reflection.clone())
+                                    .absolute()
+                                    .left(px((frame_width - width) / 2. - pad_x))
+                                    .top(px((preview_height - height) / 2. - pad_y))
+                                    .w(px(width + 2. * pad_x))
+                                    .h(px(height + 2. * pad_y))
+                                    .object_fit(ObjectFit::Fill),
+                            )
+                        })
+                    })
+                    .child(
+                        img(image)
+                            .id(("selected", self.generation))
+                            .w(px(width))
+                            .h(px(height))
+                            .rounded(px(8.))
+                            .object_fit(ObjectFit::Contain),
+                    )
+                }
+                None => s
+                    .bg(rgb(0x171919))
+                    .rounded(px(8.))
+                    .child(muted("Preview unavailable")),
+            });
         let tags = h_flex().flex_wrap().gap_1p5().children(
             item.tags
                 .iter()
@@ -355,7 +482,7 @@ impl Gallery {
             .overflow_y_scroll()
             .flex_1()
             .child(
-                v_flex().gap_4().px_5().pb_4().pt_1().child(art).child(
+                v_flex().gap_4().px_5().pb_4().pt_4().child(art).child(
                     v_flex()
                         .gap_2()
                         .child(
@@ -420,27 +547,17 @@ impl Gallery {
                     .w_full()
                     .icon(IconName::Check)
                     .label(if self.busy {
-                        "Applying…"
+                        "Applying…".to_owned()
                     } else {
-                        "Apply wallpaper"
+                        self.outputs.get(self.output).map_or_else(
+                            || "Apply wallpaper".into(),
+                            |o| format!("Apply to {}", o.name),
+                        )
                     })
                     .disabled(self.busy || !allowed || self.outputs.is_empty())
                     .on_click(cx.listener(|this, _, _, cx| this.apply(cx))),
             );
-        pane = pane.child(
-            v_flex()
-                .absolute()
-                .top_0()
-                .left_0()
-                .w_full()
-                .h(px(316.))
-                .bg(linear_gradient(
-                    180.,
-                    linear_color_stop(light.halo(), 0.),
-                    linear_color_stop(rgba(0), 1.),
-                )),
-        );
-        pane.child(header).child(body).child(footer)
+        pane.child(tools).child(body).child(footer)
     }
 }
 
@@ -469,7 +586,14 @@ impl Render for Gallery {
         self.frame += 1;
         self.cancel_offscreen_thumbnails();
         let viewport = window.viewport_size();
-        let grid = grid::GridLayout::new(viewport.width.into(), viewport.height.into());
+        let window_width = f32::from(viewport.width);
+        let max_sidebar = (window_width - 280.).clamp(MIN_SIDEBAR, MAX_SIDEBAR);
+        let sidebar = self.sidebar_width.clamp(MIN_SIDEBAR, max_sidebar);
+        let grid = grid::GridLayout::new(
+            window_width - sidebar,
+            viewport.height.into(),
+            self.prefs.thumbnail_size.width(),
+        );
         let columns = grid.columns;
         self.cache_limit = grid.cache_limit;
         if columns != self.last_columns {
@@ -530,85 +654,12 @@ impl Render for Gallery {
         .w_full()
         .flex_1()
         .min_h_0();
-        let top = h_flex()
-            .justify_between()
-            .h(px(60.))
-            .px(px(grid::GUTTER))
-            .flex_shrink_0()
-            .border_b_1()
-            .border_color(rgb(EDGE))
-            .bg(rgba(0x1a1c1bd9))
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(
-                        h_flex()
-                            .size(px(32.))
-                            .rounded(px(9.))
-                            .justify_center()
-                            .bg(rgb(PEARL))
-                            .child(
-                                Icon::new(IconName::GalleryVerticalEnd).text_color(rgb(0x202d24)),
-                            ),
-                    )
-                    .child(Label::new("WPE Gallery").text_size(px(18.)).font_semibold()),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(muted("Display"))
-                    .child(self.output_menu(cx)),
-            );
-        let controls = h_flex()
-            .gap_3()
-            .child(
-                Switch::new("safe-filter")
-                    .small()
-                    .label("Safe only")
-                    .checked(self.safe_only)
-                    .tooltip("Show only reviewed, unchanged wallpapers")
-                    .on_click(cx.listener(|this, on: &bool, _, cx| {
-                        this.safe_only = *on;
-                        this.scroll_selection = true;
-                        this.rebuild_visible(cx);
-                    })),
-            )
-            .child(
-                Button::new("reload")
-                    .small()
-                    .ghost()
-                    .icon(IconName::Redo2)
-                    .tooltip("Reload reviews")
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh_safety(cx))),
-            );
-        let heading = v_flex()
-            .gap_1()
-            .child(
-                Label::new("Wallpaper library")
-                    .text_size(px(30.))
-                    .line_height(px(38.))
-                    .font_semibold(),
-            )
-            .child(muted(format!(
-                "{} of {} installed wallpapers",
-                self.visible.len(),
-                self.items.len()
-            )));
-        let compact = viewport.width < px(950.);
         let gallery = v_flex()
-            .flex_1()
+            .w_full()
             .min_w_0()
             .h_full()
+            .pt(px(grid::GUTTER))
             .px(px(grid::GUTTER))
-            .child(
-                h_flex()
-                    .when(compact, |s| s.flex_col().items_start().gap_2())
-                    .justify_between()
-                    .flex_shrink_0()
-                    .py_4()
-                    .child(heading)
-                    .child(controls),
-            )
             .when(self.visible.is_empty(), |s| {
                 s.child(muted(
                     self.verification.empty_message(!self.items.is_empty()),
@@ -620,18 +671,46 @@ impl Render for Gallery {
                         s.child(muted(self.verification.empty_message(true)))
                     })
             })
-            .child(list)
+            .child(list);
+        let view = cx.entity().downgrade();
+        let measured_width = self.sidebar_width;
+        let inspector = v_flex()
+            .size_full()
+            .child(self.details(cx))
+            .on_children_prepainted(move |bounds, _, cx| {
+                if let Some(bounds) = bounds.first() {
+                    let width = f32::from(bounds.size.width);
+                    if width > 0. && (width - measured_width).abs() > 0.25 {
+                        _ = view.update(cx, |this, cx| {
+                            this.sidebar_width = width;
+                            cx.notify();
+                        });
+                    }
+                }
+            });
+        let view = cx.entity().downgrade();
+        let preferred = self.prefs.sidebar_width.clamp(MIN_SIDEBAR, max_sidebar);
+        let split = h_resizable(("library-split", window_width.round() as usize))
             .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .h(px(38.))
-                    .gap_4()
-                    .border_t_1()
-                    .border_color(rgb(EDGE))
-                    .child(shortcut(&["left", "right"], "Browse"))
-                    .child(shortcut(&["tab"], "Display"))
-                    .when(!compact, |s| s.child(shortcut(&["enter"], "Apply"))),
-            );
+                resizable_panel()
+                    .size(px((window_width - preferred).max(280.)))
+                    .size_range(px(280.)..Pixels::MAX)
+                    .child(gallery),
+            )
+            .child(
+                resizable_panel()
+                    .size(px(preferred))
+                    .size_range(px(MIN_SIDEBAR)..px(max_sidebar))
+                    .child(inspector),
+            )
+            .on_resize(move |state, _, cx| {
+                let width = f32::from(state.read(cx).sizes()[1])
+                    .round()
+                    .clamp(MIN_SIDEBAR, max_sidebar);
+                _ = view.update(cx, |this, _| {
+                    this.set_preference(|p| p.sidebar_width = width);
+                });
+            });
         v_flex()
             .relative()
             .track_focus(&self.focus)
@@ -666,23 +745,6 @@ impl Render for Gallery {
                     .size_full()
                     .object_fit(ObjectFit::Fill),
             )
-            .child(top)
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(gallery)
-                    .child(self.details(cx)),
-            )
+            .child(split)
     }
-}
-
-fn shortcut(keys: &[&str], label: &'static str) -> Div {
-    h_flex()
-        .gap_1()
-        .children(
-            keys.iter()
-                .map(|key| Kbd::new(Keystroke::parse(key).expect("static shortcut"))),
-        )
-        .child(muted(label).ml_1().text_xs())
 }

@@ -57,11 +57,11 @@
   ],
   "narrative": {
     "northStar": "Matte black glass",
-    "overview": "Each artwork tints its caption and preview surround. The grid and inspector share a static grain texture.",
+    "overview": "The library grid runs beside a resizable inspector. Each caption reflects the bottom of its artwork, while the inspector glass picks up light from the nearest preview edge.",
     "keyCharacteristics": [
-      "A virtualized grid of 16:9 crops with titles underneath.",
-      "A display menu and persistent inspector.",
-      "Pearl-green selection and Apply states."
+      "A headerless grid of 16:9 crops.",
+      "Display selection and gallery preferences in the resizable inspector.",
+      "A pearl outline for selection and an output badge for the saved assignment."
     ],
     "rules": [
       {

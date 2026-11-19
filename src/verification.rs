@@ -19,7 +19,7 @@ impl Verification {
             Self::Checking { .. } => self.progress().unwrap(),
             Self::Failed(error) => error.clone(),
             Self::Ready if !has_items => "No wallpapers found. Download Workshop items through Steam, then reopen.".into(),
-            Self::Ready => "No verified safe wallpapers. Add reviewed entries to whitelist.json and reload reviews, or turn Safe only off to inspect unreviewed items.".into(),
+            Self::Ready => "No verified safe wallpapers. Add reviewed entries to whitelist.json and reload reviews, or turn off Safe only in Gallery settings to inspect unreviewed items.".into(),
         }
     }
 }
