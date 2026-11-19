@@ -5,9 +5,17 @@ pub struct GridLayout {
     pub columns: usize,
     pub tile_width: f32,
     pub row_height: f32,
-    pub cache_limit: usize,
+    viewport: usize,
 }
 impl GridLayout {
+    pub fn cache_limit(&self, pixels: u32) -> usize {
+        let tile_bytes = pixels as usize * (pixels as usize * 9 / 16) * 4;
+        // Keep prefetched rows resident even on very large displays.
+        (96 * 1024 * 1024 / tile_bytes)
+            .min((self.viewport * 4).max(256))
+            .max(self.viewport + self.columns * 3)
+    }
+
     /// Visible-list position under a point measured from the grid content origin.
     pub fn position_at(&self, x: f32, y: f32) -> Option<usize> {
         if x < 0. || y < 0. {
@@ -29,15 +37,12 @@ impl GridLayout {
         let columns = (((available + GAP) / (target + GAP)).floor() as usize).clamp(1, 12);
         let tile_width = (available - GAP * (columns - 1) as f32) / columns as f32;
         let row_height = (tile_width * 9. / 16.).round() + 42. + GAP;
-        // About four viewports of thumbnails (256×144 RGBA, ~144 KiB each):
-        // scrolling back and forth reuses decodes instead of evicting them.
         let viewport = columns * ((height / row_height).ceil() as usize + 2);
-        let cache_limit = (viewport * 4).max(256);
         Self {
             columns,
             tile_width,
             row_height,
-            cache_limit,
+            viewport,
         }
     }
 }
@@ -89,7 +94,7 @@ mod tests {
         let fullscreen = GridLayout::new(4096. - 344., 1152., 215.);
         assert_eq!(fullscreen.columns, 12);
         // Four viewports of 12 columns × (6 visible + 2) rows.
-        assert_eq!(fullscreen.cache_limit, 384);
+        assert_eq!(fullscreen.cache_limit(256), 384);
     }
     #[test]
     fn stationary_pointer_tracks_the_tile_through_scroll_and_gutters() {

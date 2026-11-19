@@ -45,6 +45,7 @@ struct Gallery {
     large_task: Option<Task<()>>,
     animation: Option<Task<()>>,
     cache_limit: usize,
+    tile_pixels: u32,
     // Tile under the pointer and when it got there (drives the title marquee).
     hovered: Option<(usize, Instant)>,
     // The one pending repaint at the end of a marquee pause.
@@ -159,6 +160,7 @@ impl Gallery {
             large_task: None,
             animation: None,
             cache_limit: 256,
+            tile_pixels: 0,
             hovered: None,
             marquee_wake: title::Wake::default(),
             review_open: false,
@@ -359,7 +361,7 @@ impl Gallery {
         self.drop_large(cx);
         let generation = self.generation;
         if let Some(path) = self.items.get(index).and_then(|i| i.preview.clone())
-            && let Some(receiver) = self.pool.request(path, true)
+            && let Some(receiver) = self.pool.request(path, preview::PreviewSize::Inspector)
         {
             self.large_task = Some(cx.spawn(async move |this, cx| {
                 if let Ok(result) = receiver.await {
@@ -407,7 +409,9 @@ impl Gallery {
         }
         if !self.thumbnail_tasks.contains_key(&index)
             && let Some(path) = self.items[index].preview.clone()
-            && let Some(receiver) = self.pool.request(path, false)
+            && let Some(receiver) = self
+                .pool
+                .request(path, preview::PreviewSize::Tile(self.tile_pixels))
         {
             let task = cx.spawn(async move |this, cx| {
                 if let Ok(result) = receiver.await {

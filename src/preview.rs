@@ -23,10 +23,16 @@ impl PreviewFrame {
         cx.drop_image(self.reflection, None);
     }
 }
+#[derive(Clone, Copy)]
+pub enum PreviewSize {
+    Tile(u32),
+    Inspector,
+}
+
 type Reply = oneshot::Sender<Result<Frames, String>>;
 struct Job {
     path: PathBuf,
-    animate: bool,
+    size: PreviewSize,
     reply: Reply,
 }
 #[derive(Clone)]
@@ -56,15 +62,11 @@ impl Pool {
     pub fn request(
         &self,
         path: PathBuf,
-        animate: bool,
+        size: PreviewSize,
     ) -> Option<oneshot::Receiver<Result<Frames, String>>> {
         let (reply, receiver) = oneshot::channel();
-        let job = Job {
-            path,
-            animate,
-            reply,
-        };
-        if animate {
+        let job = Job { path, size, reply };
+        if matches!(size, PreviewSize::Inspector) {
             self.selected.send(job).ok()?;
         } else {
             self.thumbnails.try_send(job).ok()?;
@@ -77,17 +79,21 @@ fn serve(mut next: impl FnMut() -> Result<Job, mpsc::RecvError>) {
         if job.reply.is_canceled() {
             continue;
         }
-        let result = decode(&job.path, job.animate, &job.reply).map_err(|e| e.to_string());
+        let result = decode(&job.path, job.size, &job.reply).map_err(|e| e.to_string());
         let _ = job.reply.send(result);
     }
 }
-fn decode(path: &PathBuf, animate: bool, reply: &Reply) -> anyhow::Result<Frames> {
+fn decode(path: &PathBuf, size: PreviewSize, reply: &Reply) -> anyhow::Result<Frames> {
     anyhow::ensure!(
         std::fs::metadata(path)?.len() <= 32 * 1024 * 1024,
         "Preview exceeds 32 MiB"
     );
     let mut frames = Vec::<Frame>::new();
-    let max = if animate { 48 } else { 1 };
+    let max = if matches!(size, PreviewSize::Inspector) {
+        48
+    } else {
+        1
+    };
     use std::io::{Read, Seek};
     let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
     let mut magic = [0u8; 4];
@@ -105,7 +111,7 @@ fn decode(path: &PathBuf, animate: bool, reply: &Reply) -> anyhow::Result<Frames
             let frame = frame?;
             let (n, d) = frame.delay().numer_denom_ms();
             let delay = Delay::from_numer_denom_ms((n / d.max(1)).max(66), 1);
-            frames.push(convert(frame.into_buffer(), delay, animate));
+            frames.push(convert(frame.into_buffer(), delay, size));
         }
     } else {
         // Workshop previews are often mislabelled; trust content, not extension.
@@ -114,7 +120,7 @@ fn decode(path: &PathBuf, animate: bool, reply: &Reply) -> anyhow::Result<Frames
         frames.push(convert(
             reader.decode()?.into_rgba8(),
             Delay::from_numer_denom_ms(100, 1),
-            animate,
+            size,
         ));
     }
     anyhow::ensure!(!frames.is_empty(), "Empty preview");
@@ -124,7 +130,7 @@ fn decode(path: &PathBuf, animate: bool, reply: &Reply) -> anyhow::Result<Frames
             anyhow::ensure!(!reply.is_canceled(), "Preview superseded");
             let delay = Duration::from(frame.delay());
             let image = Arc::new(gpui::RenderImage::new(smallvec::smallvec![frame]));
-            let reflection = if animate {
+            let reflection = if matches!(size, PreviewSize::Inspector) {
                 crate::surface::surround(&image)
             } else {
                 crate::surface::caption(&image)
@@ -137,10 +143,31 @@ fn decode(path: &PathBuf, animate: bool, reply: &Reply) -> anyhow::Result<Frames
         })
         .collect()
 }
-fn convert(buffer: image::RgbaImage, delay: Delay, large: bool) -> Frame {
-    let image = image::DynamicImage::ImageRgba8(buffer)
-        .thumbnail(if large { 480 } else { 256 }, if large { 270 } else { 144 });
-    let mut buffer = image.into_rgba8();
+fn convert(buffer: image::RgbaImage, delay: Delay, size: PreviewSize) -> Frame {
+    let mut buffer = match size {
+        PreviewSize::Inspector => image::DynamicImage::ImageRgba8(buffer)
+            .thumbnail(480, 270)
+            .into_rgba8(),
+        PreviewSize::Tile(width) => {
+            use image::{GenericImageView, imageops};
+            let (w, h) = buffer.dimensions();
+            // Match ObjectFit::Cover before resampling, so portrait previews
+            // spend their pixel budget on the portion the tile actually shows.
+            let crop_w = w.min(h.saturating_mul(16) / 9).max(1);
+            let crop_h = h.min(w.saturating_mul(9) / 16).max(1);
+            let crop = buffer.view((w - crop_w) / 2, (h - crop_h) / 2, crop_w, crop_h);
+            if crop_w <= width {
+                crop.to_image()
+            } else {
+                imageops::resize(
+                    &*crop,
+                    width,
+                    (width * 9 / 16).max(1),
+                    imageops::FilterType::Lanczos3,
+                )
+            }
+        }
+    };
     for pixel in buffer.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
@@ -150,6 +177,16 @@ fn convert(buffer: image::RgbaImage, delay: Delay, large: bool) -> Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn portrait_thumbnail_keeps_the_detail_visible_in_a_large_tile() {
+        let frame = convert(
+            image::RgbaImage::new(640, 1280),
+            Delay::from_numer_denom_ms(100, 1),
+            PreviewSize::Tile(512),
+        );
+        assert!(frame.buffer().width() >= 512);
+    }
+
     #[test]
     fn gif_reflection_matches_each_displayed_frame() {
         let dir = tempfile::tempdir().unwrap();
@@ -167,7 +204,7 @@ mod tests {
         }
         drop(encoder);
         let (reply, _receiver) = oneshot::channel();
-        let frames = decode(&path, true, &reply).unwrap();
+        let frames = decode(&path, PreviewSize::Inspector, &reply).unwrap();
         assert_eq!(frames.len(), 2);
         for frame in frames {
             let w = frame.reflection.size(0).width.0 as usize;

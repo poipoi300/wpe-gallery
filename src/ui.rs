@@ -610,7 +610,18 @@ impl Render for Gallery {
             self.prefs.thumbnail_size.width(),
         );
         let columns = grid.columns;
-        self.cache_limit = grid.cache_limit;
+        let pixels = (grid.tile_width * window.scale_factor()).ceil() as u32;
+        let tile_pixels = pixels.div_ceil(128).clamp(1, 8) * 128;
+        if tile_pixels != self.tile_pixels {
+            self.tile_pixels = tile_pixels;
+            self.thumbnail_tasks.clear();
+            for (_, thumbnail) in self.thumbnails.drain() {
+                if let Some(frame) = thumbnail.preview {
+                    frame.release(cx);
+                }
+            }
+        }
+        self.cache_limit = grid.cache_limit(tile_pixels);
         if columns != self.last_columns {
             self.scroll_selection = true;
             self.last_columns = columns;

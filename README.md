@@ -145,7 +145,9 @@ selected-preview worker cap concurrent decodes at two. Changing selection cancel
 the previous request; cancelled GIF work stops between frames. Static grid tiles
 do not animate. Only the selected details image uses GPUI's animation scheduling.
 
-Thumbnails fit 256×144, selected previews 480×270, GIFs use at most 48 frames at
+Grid thumbnails use the tile width in display pixels, rounded up in 128-pixel steps
+to a maximum of 1024×576. The grid center-crops before downsampling and preserves
+native detail in smaller sources. Selected previews fit 480×270, GIFs use at most 48 frames at
 at most about 15 fps, and files over 32 MiB are rejected. GIF source dimensions
 are capped at 16 megapixels; image decoder allocation limits also apply.
 The thumbnail LRU scales with viewport capacity plus in-flight headroom.
