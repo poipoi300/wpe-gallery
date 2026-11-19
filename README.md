@@ -17,9 +17,15 @@ Wallpaper Engine (app 431960), its assets, and downloaded Workshop items.
 - Persistent independent output assignments; one renderer process for all outputs.
 - Atomic configuration writes; seamless renderer swap through a systemd reload.
 
-The display menu sits above a virtualized wallpaper grid and a right-hand
-inspector. Each preview tints its caption and surround against a matte black
-glass surface. The gallery is deliberately local-only in v0.2: no Workshop
+The library opens directly on the grid. Drag the divider to resize the inspector.
+Its display menu sets the Apply target. The pearl outline marks the wallpaper
+being inspected, and the **On** badge marks the target display’s saved assignment.
+The gear controls thumbnail size, artwork edge lighting, Safe only and review
+reloads. Gallery appearance and sidebar width are saved in
+`$XDG_CONFIG_HOME/wpe-gallery/preferences.json` (normally
+`~/.config/wpe-gallery/preferences.json` on Linux).
+
+The gallery is deliberately local-only in v0.2: no Workshop
 subscription management, search, filters, playlists, or property editor yet.
 See the [issue tracker](https://github.com/poipoi300/wpe-gallery/issues).
 

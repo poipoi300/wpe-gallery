@@ -1,5 +1,6 @@
 use wpe_gallery::{backend, library, renderer, safety};
 mod grid;
+mod preferences;
 mod preview;
 mod surface;
 mod title;
@@ -10,10 +11,10 @@ use backend::ApplyBackend;
 use futures::StreamExt as _;
 use gpui::*;
 use gpui_component::{Root, VirtualListScrollHandle};
+use preferences::Preferences;
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::Arc,
     time::Instant,
 };
 use verification::Verification;
@@ -21,6 +22,10 @@ struct Gallery {
     items: Vec<library::Wallpaper>,
     outputs: Vec<backend::Output>,
     output: usize,
+    assignments: library::Config,
+    prefs: Preferences,
+    // Actual sidebar width after the Kit split has laid out or clamped its panels.
+    sidebar_width: f32,
     selected: usize,
     status: String,
     busy: bool,
@@ -60,8 +65,7 @@ struct Gallery {
     renders: usize,
 }
 struct Thumbnail {
-    image: Option<Arc<RenderImage>>,
-    light: surface::EdgeLight,
+    preview: Option<preview::PreviewFrame>,
     used: u64,
 }
 /// Messages from the verification worker to the gallery.
@@ -119,10 +123,17 @@ impl Gallery {
         initial: Option<usize>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let assignments = Self::read_assignments();
+        let prefs = Preferences::read(&Preferences::path()).unwrap_or_else(|e| {
+            log::warn!("Cannot read gallery preferences: {e:#}");
+            Preferences::default()
+        });
         let selected = initial
             .or_else(|| {
-                let config = library::load_config(&library::config_path()).ok()?;
-                let id = &config.outputs.get(&outputs.first()?.name)?.wallpaper_id;
+                let id = &assignments
+                    .outputs
+                    .get(&outputs.first()?.name)?
+                    .wallpaper_id;
                 items.iter().position(|i| &i.id == id)
             })
             .unwrap_or(0);
@@ -132,6 +143,9 @@ impl Gallery {
             outputs,
             selected,
             output: 0,
+            assignments,
+            sidebar_width: prefs.sidebar_width,
+            prefs,
             status: String::new(),
             busy: false,
             pool: preview::Pool::new(),
@@ -166,6 +180,26 @@ impl Gallery {
             renders: 0,
         }
     }
+    fn read_assignments() -> library::Config {
+        library::load_config(&library::config_path()).unwrap_or_else(|e| {
+            log::warn!("Cannot read saved display assignments: {e:#}");
+            library::Config::default()
+        })
+    }
+
+    fn set_preference(&mut self, change: impl Fn(&mut Preferences)) {
+        change(&mut self.prefs);
+        if let Err(e) = Preferences::update(&Preferences::path(), change) {
+            log::warn!("Cannot save gallery preferences: {e:#}");
+        }
+    }
+
+    fn target_assignment(&self) -> Option<(&str, &str)> {
+        let output = &self.outputs.get(self.output)?.name;
+        let assignment = self.assignments.outputs.get(output)?;
+        Some((output, &assignment.wallpaper_id))
+    }
+
     fn rebuild_visible(&mut self, cx: &mut Context<Self>) {
         let was_shown = self.visible.contains(&self.selected);
         self.visible = (0..self.items.len())
@@ -313,8 +347,8 @@ impl Gallery {
     fn drop_large(&mut self, cx: &mut Context<Self>) {
         self.animation.take();
         self.large_frame = 0;
-        for (image, _) in self.large.drain(..) {
-            cx.drop_image(image, None);
+        for frame in self.large.drain(..) {
+            frame.release(cx);
         }
     }
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -347,7 +381,7 @@ impl Gallery {
     /// window repaints at the GIF's rate rather than every display refresh.
     fn animate_large(&mut self, frames: preview::Frames, cx: &mut Context<Self>) {
         self.drop_large(cx);
-        let delays: Vec<_> = frames.iter().map(|(_, delay)| *delay).collect();
+        let delays: Vec<_> = frames.iter().map(|frame| frame.delay).collect();
         self.large = frames;
         if delays.len() < 2 {
             return;
@@ -365,11 +399,11 @@ impl Gallery {
             }
         }));
     }
-    fn thumb(&mut self, index: usize, cx: &mut Context<Self>) -> Option<Arc<RenderImage>> {
+    fn thumb(&mut self, index: usize, cx: &mut Context<Self>) -> Option<preview::PreviewFrame> {
         self.requested.insert(index);
         if let Some(thumbnail) = self.thumbnails.get_mut(&index) {
             thumbnail.used = self.frame;
-            return thumbnail.image.clone();
+            return thumbnail.preview.clone();
         }
         if !self.thumbnail_tasks.contains_key(&index)
             && let Some(path) = self.items[index].preview.clone()
@@ -379,15 +413,11 @@ impl Gallery {
                 if let Ok(result) = receiver.await {
                     _ = this.update(cx, |this, cx| {
                         this.thumbnail_tasks.remove(&index);
-                        let image = result.ok().and_then(|frames| frames.into_iter().next());
+                        let preview = result.ok().and_then(|frames| frames.into_iter().next());
                         this.thumbnails.insert(
                             index,
                             Thumbnail {
-                                light: image
-                                    .as_ref()
-                                    .map(|(image, _)| surface::EdgeLight::sample(image))
-                                    .unwrap_or_default(),
-                                image: image.map(|(image, _)| image),
+                                preview,
                                 used: this.frame,
                             },
                         );
@@ -409,11 +439,8 @@ impl Gallery {
         let mut by_age: Vec<_> = self.thumbnails.iter().map(|(i, t)| (t.used, *i)).collect();
         by_age.select_nth_unstable(excess - 1);
         for (_, index) in by_age.into_iter().take(excess) {
-            if let Some(Thumbnail {
-                image: Some(image), ..
-            }) = self.thumbnails.remove(&index)
-            {
-                cx.drop_image(image, None);
+            if let Some(preview) = self.thumbnails.remove(&index).and_then(|t| t.preview) {
+                preview.release(cx);
             }
         }
     }
@@ -458,6 +485,8 @@ impl Gallery {
             let result = job.await;
             _ = this.update(cx, |this, cx| {
                 this.busy = false;
+                // The backend can persist the assignment even when the service reload fails.
+                this.assignments = Self::read_assignments();
                 if result.is_err() {
                     this.recheck(index, cx);
                 }
@@ -547,14 +576,15 @@ fn main() -> anyhow::Result<()> {
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             ui::init(cx);
+            let gallery_keys = Some("Gallery && !Popover && !PopupMenu");
             cx.bind_keys([
                 KeyBinding::new("ctrl-q", Quit, None),
-                KeyBinding::new("enter", Apply, Some("Gallery")),
-                KeyBinding::new("right", Next, Some("Gallery")),
-                KeyBinding::new("left", Previous, Some("Gallery")),
-                KeyBinding::new("up", Up, Some("Gallery")),
-                KeyBinding::new("down", Down, Some("Gallery")),
-                KeyBinding::new("tab", NextOutput, Some("Gallery")),
+                KeyBinding::new("enter", Apply, gallery_keys),
+                KeyBinding::new("right", Next, gallery_keys),
+                KeyBinding::new("left", Previous, gallery_keys),
+                KeyBinding::new("up", Up, gallery_keys),
+                KeyBinding::new("down", Down, gallery_keys),
+                KeyBinding::new("tab", NextOutput, gallery_keys),
             ]);
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
@@ -581,6 +611,13 @@ fn main() -> anyhow::Result<()> {
                     let gallery = cx.new(|cx| {
                         let mut gallery = Gallery::new(items, outputs, initial, cx);
                         gallery.focus.focus(window);
+                        cx.observe_window_activation(window, |this, window, cx| {
+                            if window.is_window_active() {
+                                this.assignments = Gallery::read_assignments();
+                                cx.notify();
+                            }
+                        })
+                        .detach();
                         gallery.refresh_safety(cx);
                         gallery
                     });

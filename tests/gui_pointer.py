@@ -4,7 +4,7 @@ Builds a virtual pointer locally; installs nothing. Never starts a renderer/unit
 """
 import json, os, pathlib, shutil, struct, subprocess, sys, tempfile, time, zlib
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 repo = pathlib.Path(__file__).resolve().parents[1]
 env = json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -76,29 +76,47 @@ try:
     # The square fixture must cover the entire landscape tile, including its right edge.
     with Image.open(artifact / "default-safe-only.png") as screen:
         for x in (50, 300, 360, 605):
-            assert screen.getpixel((int(x * out["scale"]), int(210 * out["scale"])))[:3] == (34, 85, 136)
+            assert screen.getpixel((int(x * out["scale"]), int(80 * out["scale"])))[:3] == (34, 85, 136)
     # Image click and held press across redraws.
-    click(400, 230, .4)
+    click(400, 120, .4)
     capture("selected-by-pointer.png")
     click(3900, APPLY_Y)
     assignment = config / "linux-wallpaperengine/assignments.json"
     assert json.loads(assignment.read_text())["outputs"]["HEADLESS-1"]["wallpaper_id"] == "1002"
     assert (artifact / "systemctl.log").read_text().strip() == "--user reload-or-restart linux-wallpaperengine.service"
+    capture("assigned.png")
+    # The selection stays on item B while Apply adds its target-display badge.
+    with Image.open(artifact / "selected-by-pointer.png") as before, Image.open(artifact / "assigned.png") as after:
+        badge = tuple(int(v * out["scale"]) for v in (340, 155, 455, 186))
+        assert ImageChops.difference(before.crop(badge), after.crop(badge)).getbbox(), "Missing assignment badge"
     # Title click selects the first safe item.
-    click(100, 347)
+    click(100, 208)
     click(3900, APPLY_Y)
     assert json.loads(assignment.read_text())["outputs"]["HEADLESS-1"]["wallpaper_id"] == "1001"
     # Turn off safe-only and select blocked/unreviewed/changed fixtures. Enter
     # isn't needed: even clicking the disabled Apply area must not restart.
-    click(3620, 108)
+    click(4064, 26)
+    click(3856, 212)
+    click(3760, 500)
     capture("all-verdicts.png")
     count = len((artifact / "systemctl.log").read_text().splitlines())
     for x in [700, 1000, 1300]:
-        click(x, 230)
+        click(x, 100)
         for y in [APPLY_Y - 15, APPLY_Y, APPLY_Y + 15]:
             click(3900, y)
         assert len((artifact / "systemctl.log").read_text().splitlines()) == count
-    print("PASS: fractional-scale image/title selection, Apply, Safe-only and unsafe refusal")
+    # Change both preferences, close the gear and drag the Kit splitter.
+    click(4064, 26)
+    click(3990, 140)
+    click(3856, 172)
+    click(3760, 500)
+    prefs = config / "wpe-gallery/preferences.json"
+    saved = json.loads(prefs.read_text())
+    assert saved["thumbnail_size"] == "large" and not saved["artwork_lighting"], saved
+    subprocess.run([str(artifact / "pointer-device"), "drag", "3752", "3600", "500", "4096", "1152"], env=env, check=True)
+    saved = json.loads(prefs.read_text())
+    assert abs(saved["sidebar_width"] - 496) < 3, saved
+    print("PASS: fractional-scale tile selection, target badge, Apply, safety, gear preferences and sidebar drag")
     print("Evidence:", artifact)
 finally:
     app.terminate(); pointer.terminate()
