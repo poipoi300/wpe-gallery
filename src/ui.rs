@@ -21,6 +21,7 @@ use std::rc::Rc;
 const INK: u32 = 0xf2f1ed;
 const MUTED: u32 = 0xaaaead;
 const EDGE: u32 = 0x373937;
+const TILE_MATTE: u32 = 0x202221;
 const PEARL: u32 = 0xd8e8da;
 
 pub(crate) fn init(cx: &mut App) {
@@ -250,8 +251,9 @@ impl Gallery {
                     .h(px(25.))
                     .bg(linear_gradient(
                         180.,
-                        linear_color_stop(rgba(0x15171600), 0.),
-                        linear_color_stop(rgba(0x15171690), 1.),
+                        linear_color_stop(Hsla::from(rgb(TILE_MATTE)).opacity(0.), 0.),
+                        // Cover the last device pixel at fractional display scales.
+                        linear_color_stop(rgb(TILE_MATTE), 0.95),
                     )),
             )
             .when_some(assigned, |s, (display, _)| {
@@ -287,7 +289,7 @@ impl Gallery {
             .p_0()
             .rounded(px(9.))
             .overflow_hidden()
-            .bg(rgb(0x202221))
+            .bg(rgb(TILE_MATTE))
             .border_1()
             .border_color(if selected { rgb(0xb1ccb6) } else { rgb(EDGE) })
             .child(
@@ -309,6 +311,7 @@ impl Gallery {
                     .child(
                         h_flex()
                             .h(px(40.))
+                            .bg(rgb(TILE_MATTE))
                             .px(px(12.))
                             .rounded_b(px(8.))
                             .gap_2()
