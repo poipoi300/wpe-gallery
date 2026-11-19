@@ -2,7 +2,7 @@ use super::*;
 use crate::preferences::{MAX_SIDEBAR, MIN_SIDEBAR, ThumbnailSize};
 use gpui::prelude::*;
 use gpui_component::{
-    Disableable, Icon, IconName, Selectable, Sizable, StyledExt, Theme, ThemeMode,
+    ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, StyledExt, Theme, ThemeMode,
     button::{Button, ButtonVariants},
     collapsible::Collapsible,
     divider::Divider,
@@ -21,7 +21,6 @@ use std::rc::Rc;
 const INK: u32 = 0xf2f1ed;
 const MUTED: u32 = 0xaaaead;
 const EDGE: u32 = 0x373937;
-const TILE_MATTE: u32 = 0x202221;
 const PEARL: u32 = 0xd8e8da;
 
 pub(crate) fn init(cx: &mut App) {
@@ -208,6 +207,7 @@ impl Gallery {
             .as_ref()
             .filter(|_| self.prefs.artwork_lighting)
             .map(|f| f.reflection.clone());
+        let compact_tile = self.prefs.thumbnail_size != ThumbnailSize::Large;
         let selected = index == self.selected;
         let assigned = self
             .target_assignment()
@@ -251,9 +251,8 @@ impl Gallery {
                     .h(px(25.))
                     .bg(linear_gradient(
                         180.,
-                        linear_color_stop(Hsla::from(rgb(TILE_MATTE)).opacity(0.), 0.),
-                        // Cover the last device pixel at fractional display scales.
-                        linear_color_stop(rgb(TILE_MATTE), 0.95),
+                        linear_color_stop(rgba(0x15171600), 0.),
+                        linear_color_stop(rgba(0x15171690), 1.),
                     )),
             )
             .when_some(assigned, |s, (display, _)| {
@@ -289,7 +288,7 @@ impl Gallery {
             .p_0()
             .rounded(px(9.))
             .overflow_hidden()
-            .bg(rgb(TILE_MATTE))
+            .bg(rgb(0x202221))
             .border_1()
             .border_color(if selected { rgb(0xb1ccb6) } else { rgb(EDGE) })
             .child(
@@ -311,7 +310,17 @@ impl Gallery {
                     .child(
                         h_flex()
                             .h(px(40.))
-                            .bg(rgb(TILE_MATTE))
+                            // Cover the last raster row of the cropped image. At
+                            // fractional scales its sprite can outpaint the fade.
+                            .when(compact_tile, |footer| {
+                                footer.mt(px(-1.)).h(px(41.)).bg(if selected {
+                                    cx.theme().list_active
+                                } else if hovered.is_some() {
+                                    cx.theme().list_hover
+                                } else {
+                                    rgb(0x202221).into()
+                                })
+                            })
                             .px(px(12.))
                             .rounded_b(px(8.))
                             .gap_2()
@@ -323,6 +332,9 @@ impl Gallery {
                                         .absolute()
                                         .inset_0()
                                         .size_full()
+                                        // Sample inside the reflection's first texel
+                                        // instead of across its atlas boundary.
+                                        .when(compact_tile, |light| light.top(px(-2.)).h(px(43.)))
                                         .object_fit(ObjectFit::Fill),
                                 )
                             })
