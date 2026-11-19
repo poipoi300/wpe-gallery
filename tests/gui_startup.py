@@ -61,9 +61,10 @@ def launch(name):
     apps.append(app)
     # /proc/PID/environ is the parent's until exec completes.
     wait_for(lambda: os.readlink(f"/proc/{app.pid}/exe") == str(binary), "exec", 5)
-    data = Path(f"/proc/{app.pid}/environ").read_bytes().split(b"\0")
-    for key in ["XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "NIRI_SOCKET"]:
-        assert (key+"="+env[key]).encode() in data
+    expected = {(key + "=" + env[key]).encode() for key in ("XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "NIRI_SOCKET")}
+    # The executable symlink can change before procfs exposes its environment.
+    wait_for(lambda: expected.issubset(Path(f"/proc/{app.pid}/environ").read_bytes().split(b"\0")),
+             "private compositor environment", 5)
     return app, log
 def windows():
     return json.loads(subprocess.check_output(["niri", "msg", "--json", "windows"], env=env))

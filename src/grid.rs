@@ -1,21 +1,43 @@
 // Geometry is recomputed from the configured client viewport each render.
-pub const ROW_HEIGHT: f32 = 164.;
+pub const INSPECTOR: f32 = 344.;
+pub const GUTTER: f32 = 24.;
+pub const GAP: f32 = 14.;
 pub struct GridLayout {
     pub columns: usize,
     pub tile_width: f32,
+    pub row_height: f32,
     pub cache_limit: usize,
 }
 impl GridLayout {
+    /// Visible-list position under a point measured from the grid content origin.
+    pub fn position_at(&self, x: f32, y: f32) -> Option<usize> {
+        if x < 0. || y < 0. {
+            return None;
+        }
+        let pitch = self.tile_width + GAP;
+        let column = (x / pitch) as usize;
+        if column >= self.columns
+            || x % pitch >= self.tile_width
+            || y % self.row_height >= self.row_height - GAP
+        {
+            return None;
+        }
+        Some((y / self.row_height) as usize * self.columns + column)
+    }
+
     pub fn new(width: f32, height: f32) -> Self {
-        let columns = (((width - 388.) / 190.).floor() as usize).clamp(1, 12);
-        let tile_width = ((width - 372. - 12. * (columns - 1) as f32) / columns as f32).max(80.);
+        let available = (width - INSPECTOR - 2. * GUTTER).max(80.);
+        let columns = (((available + GAP) / (215. + GAP)).floor() as usize).clamp(1, 12);
+        let tile_width = (available - GAP * (columns - 1) as f32) / columns as f32;
+        let row_height = (tile_width * 9. / 16.).round() + 42. + GAP;
         // About four viewports of thumbnails (256×144 RGBA, ~144 KiB each):
         // scrolling back and forth reuses decodes instead of evicting them.
-        let viewport = columns * ((height / ROW_HEIGHT).ceil() as usize + 2);
+        let viewport = columns * ((height / row_height).ceil() as usize + 2);
         let cache_limit = (viewport * 4).max(256);
         Self {
             columns,
             tile_width,
+            row_height,
             cache_limit,
         }
     }
@@ -59,16 +81,28 @@ mod tests {
         assert_eq!(tiled.columns, 4);
         assert!(tiled.tile_width.is_finite() && tiled.tile_width > 80.);
         assert!(
-            tiled.columns as f32 * tiled.tile_width + 12. * (tiled.columns - 1) as f32
-                <= 1331. - 372. + 0.01
+            tiled.columns as f32 * tiled.tile_width + GAP * (tiled.columns - 1) as f32
+                <= 1331. - INSPECTOR - 2. * GUTTER + 0.01
         );
         let resized = GridLayout::new(1336., 1107.);
         assert_eq!(tiled.columns, resized.columns);
         assert_ne!(tiled.tile_width, resized.tile_width);
         let fullscreen = GridLayout::new(4096., 1152.);
         assert_eq!(fullscreen.columns, 12);
-        // Four viewports of 12 columns × (8 visible + 2) rows.
-        assert_eq!(fullscreen.cache_limit, 480);
+        // Four viewports of 12 columns × (6 visible + 2) rows.
+        assert_eq!(fullscreen.cache_limit, 384);
+    }
+    #[test]
+    fn stationary_pointer_tracks_the_tile_through_scroll_and_gutters() {
+        let grid = GridLayout::new(1331., 900.);
+        assert_eq!(grid.position_at(25., 60.), Some(0));
+        assert_eq!(grid.position_at(25., 65.), Some(0));
+        assert_eq!(grid.position_at(25., grid.row_height - 1.), None);
+        assert_eq!(
+            grid.position_at(25., grid.row_height + 5.),
+            Some(grid.columns)
+        );
+        assert_eq!(grid.position_at(grid.tile_width + 1., 60.), None);
     }
     #[test]
     fn horizontal_steps_wrap_rows_and_clamp_at_ends() {

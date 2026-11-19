@@ -1,184 +1,68 @@
 ---
 name: WPE Gallery
-description: A compact native wallpaper gallery with a persistent details pane.
+description: A native wallpaper library with matte black glass surfaces and a persistent inspector.
 colors:
-  canvas: "#181b20"
-  pane: "#22262d"
-  artwork-ground: "#121519"
-  foreground: "#edf0f4"
-  secondary-text: "#b6beca"
-  control: "#303741"
-  control-hover: "#414c5b"
-  divider: "#363d47"
-  display-selected: "#325c8a"
-  apply: "#2866ad"
-  selection: "#569dff"
+  canvas: "#161717"
+  pane: "#242626"
+  artwork-ground: "#111212"
+  foreground: "#f2f1ed"
+  secondary-text: "#aaaead"
+  control: "#292b2a"
+  control-hover: "#333633"
+  divider: "#373937"
+  apply: "#d8e8da"
+  apply-text: "#19251d"
+  selection: "#b1ccb6"
 typography:
   body:
-    fontFamily: "sans-serif"
-    fontSize: "0.875rem"
+    fontFamily: Inter
+    fontSize: "14px"
     fontWeight: 400
   app-title:
-    fontFamily: "sans-serif"
-    fontSize: "1.125rem"
+    fontFamily: Inter
+    fontSize: "18px"
     fontWeight: 600
   wallpaper-title:
-    fontFamily: "sans-serif"
-    fontSize: "1.25rem"
+    fontFamily: Inter
+    fontSize: "25px"
     fontWeight: 600
 rounded:
-  sm: "0.125rem"
+  control: "7px"
+  tile: "9px"
 spacing:
-  compact: "0.25rem"
-  small: "0.5rem"
-  related: "0.75rem"
-  group: "1rem"
-  pane: "1.25rem"
+  tile-gap: "14px"
+  pane: "20px"
+  gallery: "24px"
 components:
   button-primary:
     backgroundColor: "{colors.apply}"
-    textColor: "{colors.foreground}"
-    rounded: "{rounded.sm}"
-    padding: "0.5rem 1rem"
+    textColor: "{colors.apply-text}"
+    rounded: "{rounded.control}"
   button-secondary:
     backgroundColor: "{colors.control}"
     textColor: "{colors.foreground}"
-    rounded: "{rounded.sm}"
-    padding: "0.5rem 1rem"
-  button-hover:
-    backgroundColor: "{colors.control-hover}"
-  display-selected:
-    backgroundColor: "{colors.display-selected}"
-    textColor: "{colors.foreground}"
-    rounded: "{rounded.sm}"
-    padding: "0.5rem 1rem"
-  tag:
-    backgroundColor: "{colors.control}"
-    textColor: "{colors.foreground}"
-    rounded: "{rounded.sm}"
-    padding: "0.25rem 0.5rem"
+    rounded: "{rounded.control}"
   wallpaper-tile:
-    backgroundColor: "{colors.pane}"
     textColor: "{colors.foreground}"
+    rounded: "{rounded.tile}"
+  tag:
+    textColor: "{colors.secondary-text}"
 ---
 
-# Design System: WPE Gallery
+# WPE Gallery
 
-## Overview
+## Surfaces and light
 
-**Creative North Star: "Native gallery"**
-
-The Windows Wallpaper Engine composition is the user's visual reference.
-A graphite work surface, compact system sans typography, and blue selection
-keep the controls quiet while wallpaper artwork carries the color.
-
-**Key Characteristics:**
-- Dense artwork browsing with titles immediately beneath previews.
-- Persistent display selection and a separate details pane.
-- Blue identifies selection and the Apply action.
-
-## Colors
-
-### Primary
-
-Selection blue outlines the chosen wallpaper. Apply blue fills the main action;
-a muted blue fills the chosen display control.
-
-**The Artwork Leads Rule.** Keep interface color concentrated in selection and
-actions so installed wallpaper previews remain the visual content.
-
-### Neutral
-
-Canvas separates the gallery from the slightly lighter pane. The darkest ground
-backs artwork and missing-preview placeholders. Foreground carries titles and
-controls; secondary text carries metadata, descriptions, and shortcut hints.
-Control surfaces and dividers establish boundaries without shadows.
-
-## Typography
-
-All text uses the platform-resolved sans-serif family. The app title and selected
-wallpaper title are semibold; gallery labels and metadata use regular body text.
-The frontmatter records the three sizes actually used in the GPUI implementation.
-
-Tile titles stay on one line and truncate with an ellipsis; while the pointer is
-over a tile whose title does not fit, that title alone scrolls to reveal the rest
-and back, pausing at each end. The details title and
-description wrap within the sidebar. Native font fallback determines coverage for
-Workshop titles in additional languages.
+A single static grain image gives the black canvas a matte finish. A translucent inspector lets that texture show through. Each thumbnail supplies two color samples, averaged from the left and right halves with extra weight for brighter pixels. These colors tint the caption, the shadow under the artwork, and the selected preview's surround. Pearl green identifies the selected tile and the Apply action across all artwork colors.
 
 ## Layout
 
-The display strip sits above the gallery and details pane; both run to the
-bottom edge of the window. The sidebar stays at 340 logical pixels; its details
-scroll independently above a pinned footer holding status and Apply. Gallery rows
-are virtualized, 164 logical pixels high; a thin 24 logical pixel title banner
-leaves the rest of each tile to artwork.
-Columns adapt from one to twelve; equal computed widths keep long titles inside
-their tiles. Related items use the spacing scale recorded above.
+The header holds the application name and a display menu showing the active output and its resolution. The virtualized library has one to twelve columns of 16:9 crops. A title sits below each image and scrolls on hover when it exceeds the caption width. The filter and review reload control move below the library heading in narrow windows. Keyboard hints stay beneath the grid.
 
-The selected row scrolls into view after a selection or column-count change.
-The selected large preview has a 210 logical pixel area with contained artwork;
-tile artwork fills its available area by cropping. The window minimum is
-760 by 520 logical pixels. This is a desktop layout, with no mobile variant.
+The 344-pixel inspector fits the entire selected preview in an aspect-aware frame. It lists tags, type, Workshop ID, property count, description and verification status. Review details expand to show the reviewer, date, notes and hash. The body scrolls independently above the pinned Apply button.
 
-## Elevation & Depth
+## Components and states
 
-The interface uses tonal layers and borders. Its one shadow is a 5 logical pixel
-fade at the bottom edge of the gallery, under which rows scroll out of view; there
-is no blur or decorative elevation. A two-pixel blue outline distinguishes the selected tile;
-the normal tile outline uses the control surface color.
+Use GPUI Kit controls, labels, icons and layout primitives throughout. The artwork and grain use GPUI image elements. Keep thumbnail frames static. Animate only the selected GIF and the hovered overflowing title.
 
-## Shapes
-
-Gallery tiles and pane boundaries are square. Buttons and tag chips have the
-small corner radius in the frontmatter. Artwork is clipped to its tile area.
-
-## Components
-
-### Buttons
-
-The shared button treatment uses compact vertical and wider horizontal padding.
-Apply uses the primary fill; other controls use the control fill. Pointer hover
-uses the shared hover fill. Disabled Apply is half opaque and has no click handler;
-its label changes to “Applying…” while work runs. Status and errors appear just
-above Apply in the details footer. Keyboard actions are handled at the gallery
-root: Left/Right step through the list, Up/Down move a row in the same column.
-
-### Display selection
-
-Each output control shows its name and resolution. The selected output uses the
-muted blue fill. The active display does not imply an applied wallpaper assignment.
-
-### Tags
-
-Tags are informational chips with a control-colored fill, small corners, and
-compact padding. They are not interactive filters.
-
-### Wallpaper tiles
-
-Tiles join an artwork area and a truncated title. Hover changes the surface fill;
-selection changes the outline. Missing artwork has a text placeholder.
-Only the selected large GIF preview animates, at its own frame rate; gallery
-thumbnails remain static.
-
-## Do's and Don'ts
-
-### Do:
-- **Do** keep artwork, its title, and selection state visually adjacent.
-- **Do** use the existing tonal surfaces and blue action hierarchy.
-- **Do** preserve visible loading, disabled, empty, and error feedback.
-
-### Don't:
-- **Don't** animate every gallery tile.
-- **Don't** let long Workshop titles widen their gallery column.
-- **Don't** present informational tags as working filters.
-
-Safety states extend the existing controls: a persistent Safe only toggle defaults
-on and Reload reviews revalidates local content. Safe tiles carry no label;
-Unreviewed and Blocked tiles (listed only with Safe only off) carry a small dark
-chip over the artwork's top-left corner. In the details, a safe item shows one
-line, “Marked safe by <reviewer>”, behind a drawn disclosure chevron that expands
-the review date, notes and content hash. Other states name the state, say Apply is
-unavailable and give the reason. Disabled Apply retains its action label with
-reduced opacity. Tile selection activates on primary
-mouse-down so virtualization and image redraws cannot discard its pending click.
+Safe only defaults on. When it is off, an overlaid status tag identifies unverified or blocked items. The inspector gives the reason and disables Apply. Loading, verification errors and empty results have distinct messages.

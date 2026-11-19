@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-16T01:11:54.760729+00:00",
+  "generatedAt": "2026-11-19T00:29:55.747622+00:00",
   "title": "Design System: WPE Gallery",
   "extensions": {
     "typographyMeta": {
@@ -26,9 +26,9 @@
       "name": "Apply button",
       "kind": "button",
       "refersTo": "button-primary",
-      "description": "Primary action; native GPUI styling represented for documentation.",
+      "description": "GPUI Kit primary button pinned below the inspector.",
       "html": "<button class=\"ds-apply\">Apply wallpaper</button>",
-      "css": ".ds-apply{font:400 14px sans-serif;color:#edf0f4;border:0;border-radius:2px;padding:8px 16px;cursor:pointer;background:#2866ad}.ds-apply:hover{background:#414c5b}.ds-apply:disabled{opacity:.5;cursor:default}"
+      "css": ".ds-apply{font:400 14px Inter,sans-serif;color:#19251d;border:0;border-radius:7px;padding:8px 16px;cursor:pointer;background:#d8e8da}.ds-apply:hover{background:#e8f1e9}.ds-apply:disabled{opacity:.5;cursor:default}"
     },
     {
       "name": "Secondary button",
@@ -36,15 +36,7 @@
       "refersTo": "button-secondary",
       "description": "Shared output-control styling.",
       "html": "<button class=\"ds-secondary\">DP-1   2560 \u00d7 1440</button>",
-      "css": ".ds-secondary{font:400 14px sans-serif;color:#edf0f4;border:0;border-radius:2px;padding:8px 16px;cursor:pointer;background:#303741}.ds-secondary:hover{background:#414c5b}"
-    },
-    {
-      "name": "Selected display",
-      "kind": "nav",
-      "refersTo": "display-selected",
-      "description": "Current Apply target, shown by output name and pixel resolution.",
-      "html": "<button class=\"ds-display\">DP-1   2560 \u00d7 1440</button>",
-      "css": ".ds-display{font:400 14px sans-serif;color:#edf0f4;border:0;border-radius:2px;padding:8px 16px;cursor:pointer;background:#325c8a}.ds-display:hover{background:#414c5b}"
+      "css": ".ds-secondary{font:400 14px Inter,sans-serif;color:#f2f1ed;border:0;border-radius:7px;padding:8px 16px;cursor:pointer;background:#292b2a}.ds-secondary:hover{background:#333633}"
     },
     {
       "name": "Tag",
@@ -52,35 +44,35 @@
       "refersTo": "tag",
       "description": "Informational Workshop tag without click behavior.",
       "html": "<span class=\"ds-tag\">Technology</span>",
-      "css": ".ds-tag{display:inline-block;font:400 14px sans-serif;color:#edf0f4;background:#303741;border-radius:2px;padding:4px 8px}"
+      "css": ".ds-tag{display:inline-block;font:400 14px Inter,sans-serif;color:#f2f1ed;background:#292b2a;border-radius:7px;padding:4px 8px}"
     },
     {
       "name": "Selected wallpaper tile",
       "kind": "card",
       "refersTo": "wallpaper-tile",
-      "description": "Square preview tile with a selected outline and single-line title.",
+      "description": "A 16:9 preview with a content-tinted caption and pearl-green selection outline.",
       "html": "<div class=\"ds-tile\"><div class=\"ds-artwork\">No preview</div><div class=\"ds-title\">Wallpaper title</div></div>",
-      "css": ".ds-tile{width:220px;border:2px solid #569dff;background:#22262d;color:#edf0f4;font:400 14px sans-serif;cursor:pointer}.ds-tile:hover{background:#303741}.ds-artwork{height:112px;background:#121519;display:flex;align-items:center;justify-content:center}.ds-title{padding:4px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+      "css": ".ds-tile{width:220px;border-radius:9px;overflow:hidden;border:1px solid #b1ccb6;background:#202221;color:#f2f1ed;font:400 14px Inter,sans-serif;cursor:pointer}.ds-tile:hover{background:#292b2a}.ds-artwork{height:112px;background:#111212;display:flex;align-items:center;justify-content:center}.ds-title{padding:10px 12px;background:linear-gradient(95deg,#303c36,#343036);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
     }
   ],
   "narrative": {
-    "northStar": "Native gallery",
-    "overview": "The Windows Wallpaper Engine composition is the user's visual reference.\nA graphite work surface, compact system sans typography, and blue selection\nkeep the controls quiet while wallpaper artwork carries the color.",
+    "northStar": "Matte black glass",
+    "overview": "Each artwork tints its caption and preview surround. The grid and inspector share a static grain texture.",
     "keyCharacteristics": [
-      "Dense artwork browsing with titles immediately beneath previews.",
-      "Persistent display selection and a separate details pane.",
-      "Blue identifies selection and the Apply action."
+      "A virtualized grid of 16:9 crops with titles underneath.",
+      "A display menu and persistent inspector.",
+      "Pearl-green selection and Apply states."
     ],
     "rules": [
       {
         "name": "The Artwork Leads Rule",
-        "body": "Keep interface color concentrated in selection and\nactions so installed wallpaper previews remain the visual content.",
+        "body": "Derive the local glow from each preview and keep text legible across artwork colors.",
         "section": "colors"
       }
     ],
     "dos": [
       "Do keep artwork, its title, and selection state visually adjacent.",
-      "Do use the existing tonal surfaces and blue action hierarchy.",
+      "Use the artwork to tint surfaces and the pearl accent to signal selection.",
       "Do preserve visible loading, disabled, empty, and error feedback."
     ],
     "donts": [

@@ -1,6 +1,6 @@
 # WPE Gallery
 
-A small native Rust / [GPUI](https://www.gpui.rs/) desktop gallery for installed
+A native Rust desktop gallery built with [GPUI Kit](https://github.com/longbridge/gpui-kit) for installed
 Wallpaper Engine Workshop wallpapers. On Linux, apply a wallpaper to a display
 through [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine).
 
@@ -17,8 +17,9 @@ Wallpaper Engine (app 431960), its assets, and downloaded Workshop items.
 - Persistent independent output assignments; one renderer process for all outputs.
 - Atomic configuration writes; seamless renderer swap through a systemd reload.
 
-The layout follows the familiar display strip, wallpaper grid and right-hand
-details pane. The gallery is deliberately local-only in v0.2: no Workshop
+The display menu sits above a virtualized wallpaper grid and a right-hand
+inspector. Each preview tints its caption and surround against a matte black
+glass surface. The gallery is deliberately local-only in v0.2: no Workshop
 subscription management, search, filters, playlists, or property editor yet.
 See the [issue tracker](https://github.com/poipoi300/wpe-gallery/issues).
 
@@ -40,8 +41,7 @@ linux-wallpaperengine separately; a package providing that name is sufficient.
 
 Left/Right select the previous/next wallpaper, Up/Down the one in the row
 above/below; the selected tile is kept in view.
-Tab cycles the target output, Enter applies, Ctrl+Q quits. Click a display,
-tile, or Apply button for the same actions.
+Tab cycles the target output, Enter applies, Ctrl+Q quits. The display menu, wallpaper tiles and Apply button provide the same actions by pointer.
 
 Diagnostics:
 
@@ -282,7 +282,7 @@ the `wpe-gallery-content-v1` SHA-256 contract for whitelist integration. Private
 results and review decisions are kept outside this repository.
 
 
-Pointer regression (requires an agent-owned headless sway, clang and Wayland
+Pointer regression (requires an agent-owned headless sway, Pillow, clang and Wayland
 development tools; installs nothing):
 
 ```sh

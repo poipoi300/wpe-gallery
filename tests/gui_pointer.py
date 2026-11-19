@@ -4,6 +4,8 @@ Builds a virtual pointer locally; installs nothing. Never starts a renderer/unit
 """
 import json, os, pathlib, shutil, struct, subprocess, sys, tempfile, time, zlib
 
+from PIL import Image
+
 repo = pathlib.Path(__file__).resolve().parents[1]
 env = json.loads(pathlib.Path(sys.argv[1]).read_text())
 binary = pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else repo / "target/release/wpe-gallery").resolve()
@@ -71,6 +73,10 @@ try:
     time.sleep(2)
     ipc('[app_id="io.github.poipoi300.wpe-gallery"]', "focus")
     capture("default-safe-only.png")
+    # The square fixture must cover the entire landscape tile, including its right edge.
+    with Image.open(artifact / "default-safe-only.png") as screen:
+        for x in (50, 300, 360, 605):
+            assert screen.getpixel((int(x * out["scale"]), int(210 * out["scale"])))[:3] == (34, 85, 136)
     # Image click and held press across redraws.
     click(400, 230, .4)
     capture("selected-by-pointer.png")
@@ -79,12 +85,12 @@ try:
     assert json.loads(assignment.read_text())["outputs"]["HEADLESS-1"]["wallpaper_id"] == "1002"
     assert (artifact / "systemctl.log").read_text().strip() == "--user reload-or-restart linux-wallpaperengine.service"
     # Title click selects the first safe item.
-    click(100, 235)
+    click(100, 347)
     click(3900, APPLY_Y)
     assert json.loads(assignment.read_text())["outputs"]["HEADLESS-1"]["wallpaper_id"] == "1001"
     # Turn off safe-only and select blocked/unreviewed/changed fixtures. Enter
     # isn't needed: even clicking the disabled Apply area must not restart.
-    click(80, 100)
+    click(3620, 108)
     capture("all-verdicts.png")
     count = len((artifact / "systemctl.log").read_text().splitlines())
     for x in [700, 1000, 1300]:
