@@ -1,3 +1,4 @@
+use crate::backend::Output;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -173,14 +174,40 @@ pub struct Assignment {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
+    /// Keyed by connector name: displays without an identity, and every display in files
+    /// written before identities existed.
     pub outputs: BTreeMap<String, Assignment>,
+    /// Keyed by display identity (`backend::Output::identity`), whatever connector it is on.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub displays: BTreeMap<String, Assignment>,
 }
 impl Default for Config {
     fn default() -> Self {
         Self {
             version: 1,
             outputs: BTreeMap::new(),
+            displays: BTreeMap::new(),
         }
+    }
+}
+impl Config {
+    /// The output's entry: by its identity, else by its connector.
+    pub fn get(&self, output: &Output) -> Option<&Assignment> {
+        output
+            .identity
+            .as_ref()
+            .and_then(|i| self.displays.get(i))
+            .or_else(|| self.outputs.get(&output.name))
+    }
+    /// Stores the output's entry under its identity when it has one, else its connector.
+    pub fn insert(&mut self, output: &Output, assignment: Assignment) {
+        match &output.identity {
+            Some(identity) => self.displays.insert(identity.clone(), assignment),
+            None => self.outputs.insert(output.name.clone(), assignment),
+        };
+    }
+    pub fn is_empty(&self) -> bool {
+        self.outputs.is_empty() && self.displays.is_empty()
     }
 }
 pub fn config_path() -> PathBuf {
@@ -202,20 +229,22 @@ pub fn load_config(path: &Path) -> Result<Config> {
     );
     Ok(c)
 }
-pub fn save_assignment(path: &Path, output: &str, id: &str) -> Result<()> {
+/// Assigns wallpaper `id` to `output`, keeping its properties when the wallpaper is unchanged. A
+/// display with an identity drops its connector entry so the two never disagree.
+pub fn save_assignment(path: &Path, output: &Output, id: &str) -> Result<()> {
     anyhow::ensure!(
-        !output.is_empty() && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
+        !output.name.is_empty() && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
         "invalid assignment"
     );
     let parent = path.parent().unwrap();
     fs::create_dir_all(parent)?;
     let mut config = load_config(path)?;
-    let old = config
-        .outputs
-        .remove(output)
-        .filter(|a| a.wallpaper_id == id);
-    config.outputs.insert(
-        output.into(),
+    let old = config.get(output).filter(|a| a.wallpaper_id == id).cloned();
+    if output.identity.is_some() {
+        config.outputs.remove(&output.name);
+    }
+    config.insert(
+        output,
         old.unwrap_or(Assignment {
             wallpaper_id: id.into(),
             ..Default::default()
@@ -262,12 +291,44 @@ mod tests {
             Some(item.join("preview.jpg").canonicalize().unwrap())
         );
     }
+    fn connector(name: &str) -> Output {
+        Output {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn saving_a_display_replaces_its_connector_entry() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("assignments.json");
+        save_assignment(&p, &connector("DP-3"), "123").unwrap();
+        save_assignment(&p, &connector("DP-6"), "456").unwrap();
+        let mut config = load_config(&p).unwrap();
+        config
+            .outputs
+            .get_mut("DP-6")
+            .unwrap()
+            .properties
+            .insert("color".into(), serde_json::json!("1 0 0"));
+        fs::write(&p, serde_json::to_vec(&config).unwrap()).unwrap();
+        let display = Output {
+            identity: Some("Make Model Serial".into()),
+            ..connector("DP-6")
+        };
+        save_assignment(&p, &display, "456").unwrap();
+        let config = load_config(&p).unwrap();
+        assert_eq!(config.outputs.keys().collect::<Vec<_>>(), ["DP-3"]);
+        assert_eq!(
+            config.displays["Make Model Serial"].properties["color"],
+            "1 0 0"
+        );
+    }
     #[test]
     fn assignments_preserve_other_outputs_and_properties() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("assignments.json");
-        save_assignment(&p, "DP-1", "123").unwrap();
-        save_assignment(&p, "DP-2", "456").unwrap();
+        save_assignment(&p, &connector("DP-1"), "123").unwrap();
+        save_assignment(&p, &connector("DP-2"), "456").unwrap();
         let mut config = load_config(&p).unwrap();
         config
             .outputs
@@ -276,21 +337,21 @@ mod tests {
             .properties
             .insert("color".into(), serde_json::json!("1 0 0"));
         fs::write(&p, serde_json::to_vec(&config).unwrap()).unwrap();
-        save_assignment(&p, "DP-1", "123").unwrap();
+        save_assignment(&p, &connector("DP-1"), "123").unwrap();
         assert_eq!(
             load_config(&p).unwrap().outputs["DP-1"].properties["color"],
             "1 0 0"
         );
-        save_assignment(&p, "DP-1", "789").unwrap();
+        save_assignment(&p, &connector("DP-1"), "789").unwrap();
         assert!(
             load_config(&p).unwrap().outputs["DP-1"]
                 .properties
                 .is_empty()
         );
-        save_assignment(&p, "DP-1", "123").unwrap();
+        save_assignment(&p, &connector("DP-1"), "123").unwrap();
         assert_eq!(load_config(&p).unwrap().outputs["DP-1"].wallpaper_id, "123");
         fs::write(&p, b"{broken").unwrap();
-        assert!(save_assignment(&p, "DP-1", "789").is_err());
+        assert!(save_assignment(&p, &connector("DP-1"), "789").is_err());
         assert_eq!(fs::read(&p).unwrap(), b"{broken");
     }
 }

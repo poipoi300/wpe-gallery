@@ -13,7 +13,7 @@ Wallpaper Engine (app 431960), its assets, and downloaded Workshop items.
 - Discover Steam libraries from libraryfolders.vdf, including additional drives.
 - Virtualized gallery, local titles, types, tags, descriptions and property counts.
 - JPEG/PNG/WebP thumbnails; selected GIF animation.
-- Wayland output names and native resolutions, with niri JSON fallback.
+- Wayland outputs with display identities (make, model, serial) and native resolutions, with niri JSON fallback.
 - Persistent independent output assignments; one renderer process for all outputs.
 - Atomic configuration writes; seamless renderer swap through a systemd reload.
 
@@ -88,26 +88,38 @@ Apply writes `$XDG_CONFIG_HOME/linux-wallpaperengine/assignments.json`
 ```json
 {
   "version": 1,
+  "displays": {
+    "Acme Corporation Vista 34 AC1234567": {"wallpaper_id": "1234567890", "properties": {}}
+  },
   "outputs": {
-    "DP-1": {"wallpaper_id": "1234567890", "properties": {}},
     "HDMI-A-1": {"wallpaper_id": "2345678901", "properties": {}}
   }
 }
 ```
+
+`displays` keys a display by its identity, `make model serial` as niri names outputs (the
+serial comes from niri; other compositors give `make model`), so its wallpaper follows it when
+the compositor renumbers its connector (`DP-3` becoming `DP-6` after a reboot or a cable move).
+`outputs` keys by connector name: displays that report no make and model, two identical
+displays without serials, and every display in files from older versions. The two maps never
+mix: an identity only matches a display reporting it, and a connector entry only the output on
+that connector, so a virtual output named like a display cannot take its wallpaper. An output
+uses its `displays` entry first, else its connector entry, and Apply to a display with an
+identity replaces its connector entry.
 
 Only reviewed-safe, hash-matching items can be applied. Only the chosen output changes; existing assignments for other outputs survive.
 The file is written to a temporary file in the same directory, synced and renamed.
 Malformed or future-version configurations produce an error rather than being
 overwritten. Run one app instance when editing assignments.
 
-The launcher verifies every selected item and passes its absolute verified directory, avoiding a different Steam library being resolved by the renderer. It sorts output names and constructs one argument array:
+The launcher finds each enabled output's entry and its current connector, skips entries whose display is not connected, verifies every selected item and passes its absolute verified directory, avoiding a different Steam library being resolved by the renderer. It sorts connector names and constructs one argument array:
 
 ```text
 linux-wallpaperengine --silent --fps WPE_FPS   --fullscreen-pause-only-active --scaling fill   --screen-root DP-1 --bg /verified/SteamLibrary/steamapps/workshop/content/431960/1234567890 --scaling fill   --screen-root HDMI-A-1 --bg /verified/SteamLibrary/steamapps/workshop/content/431960/2345678901 --scaling fill
 ```
 
 It preserves WPE_FPS (30 by default) and the existing fullscreen pause rule.
-Before assignments.json exists, WPE_BG and WPE_OUTPUT from wallpaper.env retain
+Before assignments.json exists, WPE_BG and WPE_OUTPUT (a display identity or connector name) from wallpaper.env retain
 their single-display behavior, subject to the same whitelist checks; unset WPE_OUTPUT uses the first active Wayland output (niri fallback). Remove assignments.json to return to that mode.
 Disconnected-output assignments are retained; edit the file to remove stale names
 and reopen the app after display changes. Hotplug handling is future work.

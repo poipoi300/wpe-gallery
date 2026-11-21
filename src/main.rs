@@ -131,10 +131,7 @@ impl Gallery {
         });
         let selected = initial
             .or_else(|| {
-                let id = &assignments
-                    .outputs
-                    .get(&outputs.first()?.name)?
-                    .wallpaper_id;
+                let id = &assignments.get(outputs.first()?)?.wallpaper_id;
                 items.iter().position(|i| &i.id == id)
             })
             .unwrap_or(0);
@@ -197,9 +194,9 @@ impl Gallery {
     }
 
     fn target_assignment(&self) -> Option<(&str, &str)> {
-        let output = &self.outputs.get(self.output)?.name;
-        let assignment = self.assignments.outputs.get(output)?;
-        Some((output, &assignment.wallpaper_id))
+        let output = self.outputs.get(self.output)?;
+        let assignment = self.assignments.get(output)?;
+        Some((output.label(), &assignment.wallpaper_id))
     }
 
     fn rebuild_visible(&mut self, cx: &mut Context<Self>) {
@@ -473,7 +470,7 @@ impl Gallery {
             cx.notify();
             return;
         }
-        let (output, id, index) = (output.name.clone(), item.id.clone(), self.selected);
+        let (output, id, index) = (output.clone(), item.id.clone(), self.selected);
         self.busy = true;
         self.status = "Applying wallpaper…".into();
         cx.notify();
@@ -482,7 +479,7 @@ impl Gallery {
         let job = cx.background_executor().spawn(async move {
             backend::Platform
                 .apply(&output, &id)
-                .map(|_| output)
+                .map(|_| output.label().to_owned())
                 .map_err(|e| format!("{e:#}"))
         });
         cx.spawn(async move |this, cx| {

@@ -61,7 +61,7 @@ impl Gallery {
         let output = self.outputs.get(self.output);
         let gallery = cx.entity().downgrade();
         let caption = output
-            .map(|o| o.name.clone())
+            .map(|o| o.label().to_owned())
             .unwrap_or_else(|| "No connected outputs".into());
         Button::new("output")
             .small()
@@ -77,8 +77,11 @@ impl Gallery {
                         let gallery = gallery.downgrade();
                         menu = menu.item(
                             PopupMenuItem::new(format!(
-                                "{}   ·   {} × {}",
-                                output.name, output.width, output.height
+                                "{}   ·   {}   ·   {} × {}",
+                                output.label(),
+                                output.name,
+                                output.width,
+                                output.height
                             ))
                             .checked(i == state.output)
                             .on_click(move |_, window, cx| {
@@ -566,7 +569,7 @@ impl Gallery {
                     } else {
                         self.outputs.get(self.output).map_or_else(
                             || "Apply wallpaper".into(),
-                            |o| format!("Apply to {}", o.name),
+                            |o| format!("Apply to {}", o.label()),
                         )
                     })
                     .disabled(self.busy || !allowed || self.outputs.is_empty())
